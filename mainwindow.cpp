@@ -4,7 +4,9 @@
 #include <QDir>
 #include <QDirIterator>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFutureWatcher>
+#include <QMessageBox>
 #include <QString>
 #include "asyncdirectoryscanner.h"
 #include "progressbutton.h"
@@ -362,13 +364,41 @@ void MainWindow::on_btnGenerate_clicked()
 
 void MainWindow::on_btnSave_clicked()
 {
-    QString defaultFileExtension = "PNG (*.png)";
+    const QImage *out = m_imageProcessing.getOutputImage();
+    if (out == nullptr)
+        return;
+
+    QString pngFilter = tr("PNG (*.png)");
+    QString jpegFilter = tr("JPEG (*.jpg)");
+    QString selectedFilter = pngFilter;
     QString filename = QFileDialog::getSaveFileName(this,
-                                                    "Save Mosaic Image",
-                                                    m_baseImagePath.isEmpty() ? QDir::homePath() : m_baseImagePath,
-                                                    tr("JPEG (*.jpg);;PNG (*.png)"),
-                                                    &defaultFileExtension);
-    m_imageProcessing.getOutputImage()->save(filename);
+                                                    tr("Save Mosaic Image"),
+                                                    suggestedMosaicFileName(m_baseImagePath),
+                                                    pngFilter + ";;" + jpegFilter,
+                                                    &selectedFilter);
+
+    if (filename.isEmpty())
+        return;
+
+    // QImage::save() picks the format from the suffix and fails without one.
+    if (QFileInfo(filename).suffix().isEmpty())
+        filename += (selectedFilter == jpegFilter) ? ".jpg" : ".png";
+
+    // Overwriting the base image would replace the original photo and lose its metadata.
+    if (!m_baseImagePath.isEmpty() && QFileInfo(filename) == QFileInfo(m_baseImagePath))
+    {
+        QMessageBox::warning(this,
+                             tr("Save Mosaic Image"),
+                             tr("The mosaic can't be saved over its base image. Please choose another file name."));
+        return;
+    }
+
+    if (!out->save(filename))
+    {
+        QMessageBox::warning(this,
+                             tr("Save Mosaic Image"),
+                             tr("The mosaic could not be saved to %1.").arg(QDir::toNativeSeparators(filename)));
+    }
 }
 
 void MainWindow::on_btnSetImageFolder_clicked()

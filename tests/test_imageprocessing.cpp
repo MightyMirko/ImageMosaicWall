@@ -1,6 +1,7 @@
 #include "imageprocessing.h"
 
 #include <QColor>
+#include <QDir>
 #include <QImage>
 #include <QImageReader>
 #include <QTemporaryDir>
@@ -112,6 +113,27 @@ private slots:
         exifImage->writeMetadata();
 
         QCOMPARE(loadOrientedImage(path).size(), QSize(40, 60));
+    }
+
+    // The save dialog must never suggest the base image itself (issue #1).
+    void suggestedFileNameNeverOverwritesBaseImage()
+    {
+        QString base = saveImage("IMG_1234.jpg", solidImage(QSize(8, 8), Qt::red));
+        QDir dir(m_dir.path());
+
+        QCOMPARE(suggestedMosaicFileName(base), dir.filePath("IMG_1234_mosaic.png"));
+
+        saveImage("IMG_1234_mosaic.png", solidImage(QSize(8, 8), Qt::red));
+        QCOMPARE(suggestedMosaicFileName(base), dir.filePath("IMG_1234_mosaic_2.png"));
+
+        saveImage("IMG_1234_mosaic_2.png", solidImage(QSize(8, 8), Qt::red));
+        QCOMPARE(suggestedMosaicFileName(base), dir.filePath("IMG_1234_mosaic_3.png"));
+
+        // A file that is already called *.png must not be suggested either.
+        QString pngBase = saveImage("scan.png", solidImage(QSize(8, 8), Qt::red));
+        QCOMPARE(suggestedMosaicFileName(pngBase), dir.filePath("scan_mosaic.png"));
+
+        QVERIFY(suggestedMosaicFileName(QString()).endsWith("mosaic.png"));
     }
 
     void gridCellsMeanOfUniformImage()

@@ -3,6 +3,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <QDebug>
+#include <QDir>
+#include <QFileInfo>
 #include <QImage>
 #include <QImageReader>
 #include <exiv2/exiv2.hpp>
@@ -429,6 +431,23 @@ QImage loadOrientedImage(const QString &filename)
     QImageReader reader(filename);
     reader.setAutoTransform(true);
     return reader.read();
+}
+
+QString suggestedMosaicFileName(const QString &baseImagePath)
+{
+    if (baseImagePath.isEmpty())
+        return QDir::home().filePath("mosaic.png");
+
+    // Next to the base image, but never the base image itself: "IMG_1234_mosaic.png",
+    // then "IMG_1234_mosaic_2.png" and so on if that file already exists.
+    QFileInfo base(baseImagePath);
+    QString stem = base.completeBaseName() + "_mosaic";
+    QString candidate = base.dir().filePath(stem + ".png");
+
+    for (int n = 2; QFileInfo::exists(candidate); ++n)
+        candidate = base.dir().filePath(QString("%1_%2.png").arg(stem).arg(n));
+
+    return candidate;
 }
 
 QImage extractThumbnail(const QString filename, QSize minSize)

@@ -29,7 +29,7 @@ jobs:
           cmake --build build-app
 
       - name: Run tests
-        run: ctest --test-dir build-app --output-on-failure
+        run: ctest --test-dir build-app --output-on-failure --no-tests=error
 
       - name: Build digiKam plugin
         run: |
@@ -53,7 +53,7 @@ jobs:
           cmake --build build
 
       - name: Run tests
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure --no-tests=error
 
   windows:
     name: Windows (MSVC, Qt 6)
@@ -91,7 +91,7 @@ jobs:
           cmake --build build --config RelWithDebInfo
 
       - name: Run tests
-        run: ctest --test-dir build -C RelWithDebInfo --output-on-failure
+        run: ctest --test-dir build -C RelWithDebInfo --output-on-failure --no-tests=error
 
   macos:
     name: macOS (Homebrew, Qt 6)
@@ -108,4 +108,4 @@ jobs:
           cmake --build build
 
       - name: Run tests
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure --no-tests=error

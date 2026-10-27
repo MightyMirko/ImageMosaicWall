@@ -1,5 +1,11 @@
 # Image Mosaic Wall
 
+> **Maintained fork.** This is a maintained continuation of [scheckmedia/ImageMosaicWall](https://github.com/scheckmedia/ImageMosaicWall) by Tobias Scheck, which has had no activity since 2023. The tool is shipped as the Mosaic Wall plugin in digiKam's AppImage, Windows and macOS bundles.
+>
+> Since the fork, `master` contains fixes for the crash after changing the grid size ([KDE bug 488061](https://bugs.kde.org/show_bug.cgi?id=488061)), data races between the generation threads, empty cells, Exif orientation, tile cropping and dark edge cells. They are also offered upstream in [#25](https://github.com/scheckmedia/ImageMosaicWall/pull/25) and [#26](https://github.com/scheckmedia/ImageMosaicWall/pull/26).
+>
+> Bugs and ideas: [issues](https://github.com/MightyMirko/ImageMosaicWall/issues).
+
 This application allows you to create an image based on a bunch of other images. It looks like a mosaic effect. But on detail you can check the following video.
 
 [![](http://i3.ytimg.com/vi/FyXyUtVnVyQ/maxresdefault.jpg)](https://www.youtube.com/watch?v=FyXyUtVnVyQ "")

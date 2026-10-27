@@ -10,6 +10,7 @@ project(ImageMosaicWall)
 
 option(ENABLE_DPLUGIN "Build digiKam plugin only of Image Mosaic Wall tool (default=OFF)" OFF)
 option(BUILD_WITH_QT6 "Build with Qt6, else Qt5"                                          OFF)
+option(BUILD_TESTING "Build the unit tests"                                              OFF)
 
 set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules ${CMAKE_MODULE_PATH})
 
@@ -149,6 +150,13 @@ target_link_libraries(imagemosaicwallcore
 
 if(NOT MSVC)
     target_compile_options(imagemosaicwallcore PRIVATE -fPIC)
+endif()
+
+if(BUILD_TESTING)
+
+    enable_testing()
+    add_subdirectory(tests)
+
 endif()
 
 if(NOT ENABLE_DPLUGIN)

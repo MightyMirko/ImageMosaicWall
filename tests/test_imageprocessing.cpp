@@ -1,0 +1,247 @@
+#include "imageprocessing.h"
+
+#include <QColor>
+#include <QImage>
+#include <QImageReader>
+#include <QTemporaryDir>
+#include <QTest>
+
+#include <exiv2/exiv2.hpp>
+
+namespace
+{
+
+QImage solidImage(QSize size, const QColor &color)
+{
+    QImage image(size, QImage::Format_RGB32);
+    image.fill(color);
+    return image;
+}
+
+bool similar(const QColor &a, const QColor &b, int tolerance)
+{
+    return qAbs(a.red() - b.red()) <= tolerance && qAbs(a.green() - b.green()) <= tolerance &&
+           qAbs(a.blue() - b.blue()) <= tolerance;
+}
+
+bool similar(const QImage &a, const QImage &b, int tolerance)
+{
+    if (a.size() != b.size())
+        return false;
+
+    for (int y = 0; y < a.height(); ++y)
+        for (int x = 0; x < a.width(); ++x)
+            if (!similar(a.pixelColor(x, y), b.pixelColor(x, y), tolerance))
+                return false;
+
+    return true;
+}
+
+} // namespace
+
+class TestImageProcessing : public QObject
+{
+    Q_OBJECT
+
+private:
+    QTemporaryDir m_dir;
+
+    QString saveImage(const QString &name, const QImage &image)
+    {
+        QString path = m_dir.filePath(name);
+        if (!image.save(path))
+            qFatal("could not save %s", qPrintable(path));
+        return path;
+    }
+
+private slots:
+    void initTestCase() { QVERIFY(m_dir.isValid()); }
+
+    void exifOrientationMatchesQt_data()
+    {
+        QTest::addColumn<int>("orientation");
+
+        for (int o = 1; o <= 8; ++o)
+            QTest::newRow(qPrintable(QString("orientation %1").arg(o))) << o;
+    }
+
+    // applyExifOrientation() is used for embedded previews; it must agree with
+    // Qt's own auto-transform, which is used when files are loaded directly.
+    void exifOrientationMatchesQt()
+    {
+        QFETCH(int, orientation);
+
+        // Asymmetric content, so every mirror and rotation gives a different image.
+        QImage source = solidImage(QSize(60, 40), Qt::gray);
+        for (int y = 0; y < 10; ++y)
+            for (int x = 0; x < 20; ++x)
+                source.setPixelColor(x, y, Qt::red);
+        for (int y = 25; y < 40; ++y)
+            for (int x = 45; x < 60; ++x)
+                source.setPixelColor(x, y, Qt::blue);
+
+        QString path = m_dir.filePath(QString("orientation%1.jpg").arg(orientation));
+        QVERIFY(source.save(path, "JPEG", 100));
+
+        auto exifImage = Exiv2::ImageFactory::open(path.toStdString());
+        exifImage->readMetadata();
+        exifImage->exifData()["Exif.Image.Orientation"] = static_cast<uint16_t>(orientation);
+        exifImage->writeMetadata();
+
+        QImageReader rawReader(path);
+        rawReader.setAutoTransform(false);
+        QImage mine = applyExifOrientation(rawReader.read(), orientation);
+
+        QImageReader qtReader(path);
+        qtReader.setAutoTransform(true);
+        QImage reference = qtReader.read();
+
+        QVERIFY(!reference.isNull());
+        QCOMPARE(mine.size(), reference.size());
+        QVERIFY(similar(mine.convertToFormat(QImage::Format_RGB32), reference.convertToFormat(QImage::Format_RGB32), 24));
+    }
+
+    void loadOrientedImageRotatesPortrait()
+    {
+        QString path = m_dir.filePath("portrait.jpg");
+        QVERIFY(solidImage(QSize(60, 40), Qt::green).save(path, "JPEG", 100));
+
+        auto exifImage = Exiv2::ImageFactory::open(path.toStdString());
+        exifImage->readMetadata();
+        exifImage->exifData()["Exif.Image.Orientation"] = static_cast<uint16_t>(6);
+        exifImage->writeMetadata();
+
+        QCOMPARE(loadOrientedImage(path).size(), QSize(40, 60));
+    }
+
+    void gridCellsMeanOfUniformImage()
+    {
+        ImageProcessing processing;
+        processing.processGrid(solidImage(QSize(90, 60), QColor(200, 100, 50)), QSize(3, 2));
+
+        auto colors = processing.getGridColorMap();
+        QCOMPARE(colors.size(), size_t(6));
+
+        for (const QColor &c : colors)
+            QVERIFY(similar(c, QColor(200, 100, 50), 0));
+    }
+
+    // 10 px wide with 3 columns gives 4 px cells; the last column only has 2 px
+    // inside the image. It must not come out darker than the others.
+    void gridEdgeCellsAreNotDarker()
+    {
+        ImageProcessing processing;
+        processing.processGrid(solidImage(QSize(10, 10), Qt::white), QSize(3, 3));
+
+        for (const QColor &c : processing.getGridColorMap())
+            QVERIFY2(similar(c, Qt::white, 0), qPrintable(c.name()));
+    }
+
+    // 10 px wide with 6 columns gives 2 px cells; the sixth column starts at x = 10
+    // and lies entirely outside the image. That must not divide by zero.
+    void gridCellsOutsideTheImage()
+    {
+        ImageProcessing processing;
+        processing.processGrid(solidImage(QSize(10, 10), Qt::white), QSize(6, 6));
+
+        auto colors = processing.getGridColorMap();
+        QCOMPARE(colors.size(), size_t(36));
+        QVERIFY(similar(colors.at(0), Qt::white, 0));
+    }
+
+    void generateRefusesMismatchedGrid()
+    {
+        ImageProcessing processing;
+        processing.processMosaicImages({saveImage("mismatch.png", solidImage(QSize(8, 8), Qt::red))});
+        processing.processGrid(solidImage(QSize(40, 40), Qt::red), QSize(4, 4));
+
+        QVERIFY(!processing.generateImage(QSize(40, 40), QSize(5, 5), 0));
+        QVERIFY(processing.generateImage(QSize(40, 40), QSize(4, 4), 0));
+    }
+
+    void generatePicksClosestColor()
+    {
+        ImageProcessing processing;
+        processing.processMosaicImages({saveImage("red.png", solidImage(QSize(8, 8), Qt::red)),
+                                        saveImage("blue.png", solidImage(QSize(8, 8), Qt::blue))});
+
+        QImage base = solidImage(QSize(40, 20), Qt::red);
+        for (int y = 0; y < 20; ++y)
+            for (int x = 20; x < 40; ++x)
+                base.setPixelColor(x, y, Qt::blue);
+
+        processing.processGrid(base, QSize(2, 1));
+        QVERIFY(processing.generateImage(base.size(), QSize(2, 1), 0));
+
+        const QImage *out = processing.getOutputImage();
+        QVERIFY(out != nullptr);
+        QCOMPARE(out->size(), base.size());
+        QVERIFY(similar(out->pixelColor(10, 10), Qt::red, 0));
+        QVERIFY(similar(out->pixelColor(30, 10), Qt::blue, 0));
+    }
+
+    // With only 3 images and the highest variation, every candidate is excluded
+    // by the neighbourhood history for most cells. Every cell must still be filled.
+    void generateFillsEveryCellWithFewImages()
+    {
+        ImageProcessing processing;
+        processing.processMosaicImages({saveImage("few1.png", solidImage(QSize(8, 8), Qt::red)),
+                                        saveImage("few2.png", solidImage(QSize(8, 8), Qt::green)),
+                                        saveImage("few3.png", solidImage(QSize(8, 8), Qt::blue))});
+
+        QImage base = solidImage(QSize(100, 100), Qt::darkGray);
+        processing.processGrid(base, QSize(10, 10));
+        QVERIFY(processing.generateImage(base.size(), QSize(10, 10), 15));
+
+        const QImage *out = processing.getOutputImage();
+        QVERIFY(out != nullptr);
+
+        for (int y = 0; y < out->height(); ++y)
+            for (int x = 0; x < out->width(); ++x)
+                QVERIFY2(qAlpha(out->pixel(x, y)) == 255, qPrintable(QString("empty pixel at %1,%2").arg(x).arg(y)));
+    }
+
+    // A wide tile (red | green | blue thirds) in a square cell must be cropped
+    // around its center, so only the green third is visible.
+    void generateCropsTilesAroundTheCenter()
+    {
+        QImage tile(30, 10, QImage::Format_RGB32);
+        for (int y = 0; y < 10; ++y)
+            for (int x = 0; x < 30; ++x)
+                tile.setPixelColor(x, y, x < 10 ? Qt::red : (x < 20 ? Qt::green : Qt::blue));
+
+        ImageProcessing processing;
+        processing.processMosaicImages({saveImage("thirds.png", tile)});
+
+        QImage base = solidImage(QSize(10, 10), Qt::green);
+        processing.processGrid(base, QSize(1, 1));
+        QVERIFY(processing.generateImage(base.size(), QSize(1, 1), 0));
+
+        const QImage *out = processing.getOutputImage();
+        QVERIFY(out != nullptr);
+        QVERIFY(similar(out->pixelColor(0, 0), Qt::green, 0));
+        QVERIFY(similar(out->pixelColor(5, 5), Qt::green, 0));
+        QVERIFY(similar(out->pixelColor(9, 9), Qt::green, 0));
+    }
+
+    // Grid that doesn't divide the output evenly: cells that start past the
+    // image edge are skipped instead of writing outside the buffer.
+    void generateWithUnevenGrid()
+    {
+        ImageProcessing processing;
+        processing.processMosaicImages({saveImage("uneven.png", solidImage(QSize(8, 8), Qt::yellow))});
+
+        QImage base = solidImage(QSize(100, 70), Qt::yellow);
+        processing.processGrid(base, QSize(37, 23));
+        QVERIFY(processing.generateImage(base.size(), QSize(37, 23), 1));
+
+        const QImage *out = processing.getOutputImage();
+        QVERIFY(out != nullptr);
+        QCOMPARE(out->size(), base.size());
+        QVERIFY(similar(out->pixelColor(99, 69), Qt::yellow, 0));
+    }
+};
+
+QTEST_GUILESS_MAIN(TestImageProcessing)
+
+#include "test_imageprocessing.moc"

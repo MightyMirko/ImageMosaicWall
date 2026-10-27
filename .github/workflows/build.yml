@@ -25,8 +25,11 @@ jobs:
 
       - name: Build standalone app
         run: |
-          cmake -S . -B build-app -G Ninja -DBUILD_WITH_QT6=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake -S . -B build-app -G Ninja -DBUILD_WITH_QT6=ON -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
           cmake --build build-app
+
+      - name: Run tests
+        run: ctest --test-dir build-app --output-on-failure
 
       - name: Build digiKam plugin
         run: |
@@ -46,8 +49,11 @@ jobs:
 
       - name: Build standalone app
         run: |
-          cmake -S . -B build -G Ninja -DBUILD_WITH_QT6=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake -S . -B build -G Ninja -DBUILD_WITH_QT6=OFF -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
           cmake --build build
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
 
   windows:
     name: Windows (MSVC, Qt 6)
@@ -81,8 +87,11 @@ jobs:
       - name: Build standalone app
         shell: pwsh
         run: |
-          cmake -S . -B build -DBUILD_WITH_QT6=ON "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake -S . -B build -DBUILD_WITH_QT6=ON -DBUILD_TESTING=ON "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
           cmake --build build --config RelWithDebInfo
+
+      - name: Run tests
+        run: ctest --test-dir build -C RelWithDebInfo --output-on-failure
 
   macos:
     name: macOS (Homebrew, Qt 6)
@@ -95,5 +104,8 @@ jobs:
 
       - name: Build standalone app
         run: |
-          cmake -S . -B build -DBUILD_WITH_QT6=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo "-DCMAKE_PREFIX_PATH=$(brew --prefix qt);$(brew --prefix exiv2)"
+          cmake -S . -B build -DBUILD_WITH_QT6=ON -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo "-DCMAKE_PREFIX_PATH=$(brew --prefix qt);$(brew --prefix exiv2)"
           cmake --build build
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure

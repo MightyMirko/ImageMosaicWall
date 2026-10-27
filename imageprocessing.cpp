@@ -154,6 +154,9 @@ void ImageProcessing::calculateGridCellsMean(const QImage &baseImage,
             if (ny >= baseImage.height() || ny < 0)
                 continue;
 
+            // processGrid() passes the image as Format_ARGB32, so a scan line is an array of QRgb.
+            const QRgb *line = reinterpret_cast<const QRgb *>(baseImage.constScanLine(ny));
+
             for (int x = 0; x < gridCellSize.width(); ++x)
             {
                 nx = x + gx;
@@ -161,10 +164,9 @@ void ImageProcessing::calculateGridCellsMean(const QImage &baseImage,
                 if (nx < 0 || nx >= baseImage.width())
                     continue;
 
-                QColor c = baseImage.pixelColor(nx, ny);
-                red += c.red();
-                green += c.green();
-                blue += c.blue();
+                red += qRed(line[nx]);
+                green += qGreen(line[nx]);
+                blue += qBlue(line[nx]);
                 ++numberOfPixel;
             }
         }
@@ -195,20 +197,23 @@ void ImageProcessing::calculateImageMeanMap(const QList<QString> imageList)
         if (image.isNull())
             return;
 
+        // Reading QRgb values from scan lines is much faster than a QColor per pixel.
+        // ARGB32 keeps the same 8 bit color values pixelColor() returned for any format.
+        image = image.convertToFormat(QImage::Format_ARGB32);
+
         uint64_t meanR = 0;
         uint64_t meanG = 0;
         uint64_t meanB = 0;
 
-        // QColor color(image.scaled(QSize(1, 1), Qt::IgnoreAspectRatio,
-        // Qt::FastTransformation).pixel(0,0));
         for (int y = 0; y < image.height(); ++y)
         {
+            const QRgb *line = reinterpret_cast<const QRgb *>(image.constScanLine(y));
+
             for (int x = 0; x < image.width(); ++x)
             {
-                QColor c = image.pixelColor(QPoint(x, y));
-                meanR += c.red();
-                meanG += c.green();
-                meanB += c.blue();
+                meanR += qRed(line[x]);
+                meanG += qGreen(line[x]);
+                meanB += qBlue(line[x]);
             }
         }
 
@@ -377,6 +382,9 @@ void ImageProcessing::processGrid(const QImage &baseImage, QSize gridSize)
 
     m_gridColorMap.resize(numCells);
 
+    // Converted once here for all threads; calculateGridCellsMean() reads ARGB32 scan lines.
+    QImage argbImage = baseImage.convertToFormat(QImage::Format_ARGB32);
+
     QList<QFuture<void>> jobs;
     int numCellsPerThread = itemsPerThread;
     for (int t = 0; t < maxThreads; ++t)
@@ -387,7 +395,7 @@ void ImageProcessing::processGrid(const QImage &baseImage, QSize gridSize)
         }
 
         std::function<void()> meanFnc = [=]() {
-            this->calculateGridCellsMean(baseImage, gridSize, m_gridColorMap, t * itemsPerThread, numCellsPerThread);
+            this->calculateGridCellsMean(argbImage, gridSize, m_gridColorMap, t * itemsPerThread, numCellsPerThread);
         };
 
         jobs << QtConcurrent::run(&pool, meanFnc);

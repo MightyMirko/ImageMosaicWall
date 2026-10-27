@@ -76,6 +76,8 @@ public:
 private:
     std::vector<QColor> m_gridColorMap;
     QMap<QString, QColor> m_imageMeanMap;
+    std::vector<QString> m_imagePaths;
+    std::vector<ColorLab> m_imageLabs;
     QMap<GridPoint, QString> m_gridMapCache;
     QMutex m_lockMean;
     QMutex m_lockGrid;

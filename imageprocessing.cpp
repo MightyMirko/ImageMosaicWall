@@ -52,6 +52,21 @@ void ImageProcessing::processMosaicImages(const QList<QString> &imageList)
 {
     m_imageMeanMap.clear();
     calculateImageMeanMap(imageList);
+
+    // The search in calculateMosaicPositions() compares every image with every cell.
+    // Convert the mean colors to Lab once here instead of for every cell, and keep
+    // them in plain vectors (in the map's sorted order, so ties resolve as before).
+    m_imagePaths.clear();
+    m_imageLabs.clear();
+    m_imagePaths.reserve(m_imageMeanMap.size());
+    m_imageLabs.reserve(m_imageMeanMap.size());
+
+    for (auto it = m_imageMeanMap.constBegin(); it != m_imageMeanMap.constEnd(); ++it)
+    {
+        QColor color = it.value();
+        m_imagePaths.push_back(it.key());
+        m_imageLabs.push_back(toLab(color));
+    }
 }
 
 bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int history)
@@ -271,13 +286,10 @@ void ImageProcessing::calculateMosaicPositions(const QSize gridSize, const int s
         QString bestAnyPath;
 
         // brute force knn should be replaced by kd-tree
-        // this is the bottleneck with ~30 ms per cell
-        for (auto &image : m_imageMeanMap.keys())
+        for (size_t i = 0; i < m_imagePaths.size(); ++i)
         {
-            QColor c = m_imageMeanMap.value(image);
-            ColorLab imageMean = toLab(c);
-
-            double dist = calculateDistance(cellMeanLab, imageMean);
+            const QString &image = m_imagePaths[i];
+            double dist = calculateDistance(cellMeanLab, m_imageLabs[i]);
 
             if (dist < bestAnyDistance)
             {

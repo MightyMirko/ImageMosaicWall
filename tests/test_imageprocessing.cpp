@@ -146,6 +146,19 @@ private slots:
         QVERIFY(suggestedMosaicFileName(QString()).endsWith("mosaic.png"));
     }
 
+    void imageNameFilters()
+    {
+        QStringList filters = supportedImageNameFilters();
+
+        QVERIFY(filters.contains("*.jpg"));
+        QVERIFY(filters.contains("*.jpeg"));
+        QVERIFY(filters.contains("*.png"));
+        QVERIFY(!filters.contains("*.svg"));
+        QVERIFY(!filters.contains("*.ico"));
+        QVERIFY(!filters.contains("*.nef"));
+        QCOMPARE(filters.removeDuplicates(), 0);
+    }
+
     void gridCellsMeanOfUniformImage()
     {
         ImageProcessing processing;

@@ -173,5 +173,6 @@ QImage extractThumbnail(const QString, QSize);
 QImage applyExifOrientation(const QImage &image, int orientation);
 QImage loadOrientedImage(const QString &filename, QSize minSize = QSize());
 QString suggestedMosaicFileName(const QString &baseImagePath);
+QStringList supportedImageNameFilters();
 
 #endif // IMAGEPROCESSOR_H

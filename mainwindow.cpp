@@ -195,10 +195,7 @@ void MainWindow::loadImageFolder(QString &path)
     if (path.isEmpty())
         return;
 
-    QStringList filter = QStringList() << "*.png"
-                                       << "*.jpg"
-                                       << "*.jpeg"
-                                       << "*.bmp";
+    QStringList filter = supportedImageNameFilters();
 
     auto scanner = new AsyncDirectoryScanner(
         path, filter, QDir::Files | QDir::Dirs | QDir::NoDot | QDir::NoDotDot, QDirIterator::Subdirectories);
@@ -264,7 +261,7 @@ void MainWindow::on_btnLoad_clicked()
     QString filename = QFileDialog::getOpenFileName(this,
                                                     tr("Open Image"),
                                                     m_currentFolder.isEmpty() ? QDir::homePath() : m_currentFolder,
-                                                    tr("ImageFiles (*.png *.jpg *bmp)"));
+                                                    tr("Images (%1)").arg(supportedImageNameFilters().join(' ')));
     loadImage(filename);
 }
 

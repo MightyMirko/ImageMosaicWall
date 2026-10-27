@@ -7,6 +7,7 @@
 #include <QFileInfo>
 #include <QImage>
 #include <QImageReader>
+#include <QSet>
 #include <QtMath>
 #include <exiv2/exiv2.hpp>
 #include <exiv2/exv_conf.h>
@@ -476,6 +477,31 @@ QImage loadOrientedImage(const QString &filename, QSize minSize)
     }
 
     return reader.read();
+}
+
+QStringList supportedImageNameFilters()
+{
+    // Formats Qt can read that are no photos (vector, icons, documents), and camera RAW:
+    // RAW files are often kept next to a JPEG of the same shot, which would put every
+    // photo into the mosaic twice, and they are slow to decode without a large preview.
+    static const QSet<QByteArray> excluded = {
+        "svg", "svgz", "ico", "cur", "ani", "icns", "pdf", "eps", "epsf", "epsi",
+        "3fr", "arw", "cr2", "cr3", "crw", "dcr", "dng", "erf", "fff", "iiq", "k25", "kdc", "mdc", "mef",
+        "mos", "mrw", "nef", "nrw", "orf", "pef", "raf", "raw", "rw2", "rwl", "sr2", "srf", "srw", "x3f"};
+
+    QStringList filters;
+
+    for (const QByteArray &format : QImageReader::supportedImageFormats())
+    {
+        QByteArray lower = format.toLower();
+
+        if (!excluded.contains(lower))
+            filters << QStringLiteral("*.") + QString::fromLatin1(lower);
+    }
+
+    filters.removeDuplicates();
+    filters.sort();
+    return filters;
 }
 
 QString suggestedMosaicFileName(const QString &baseImagePath)

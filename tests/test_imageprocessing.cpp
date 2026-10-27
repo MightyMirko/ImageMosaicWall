@@ -164,7 +164,6 @@ private slots:
         QVERIFY(filters.contains("*.png"));
         QVERIFY(!filters.contains("*.svg"));
         QVERIFY(!filters.contains("*.ico"));
-        QVERIFY(!filters.contains("*.nef"));
         QCOMPARE(filters.removeDuplicates(), 0);
     }
 
@@ -218,6 +217,19 @@ private slots:
 
         QCOMPARE(processing.cacheHits(), 0);
         QVERIFY(similar(processing.getImageMeanMap().value(image), Qt::red, 0));
+    }
+
+    // A RAW file next to a JPEG (or any other format) of the same shot is used only once.
+    void rawDuplicatesAreSkipped()
+    {
+        QList<QString> files = {"/photos/IMG_1.JPG", "/photos/IMG_1.CR2", "/photos/IMG_2.nef",
+                                "/photos/IMG_3.heic", "/photos/img_3.dng", "/photos/other/IMG_1.cr2",
+                                "/photos/IMG_4.png"};
+
+        QList<QString> expected = {"/photos/IMG_1.JPG", "/photos/IMG_2.nef", "/photos/IMG_3.heic",
+                                   "/photos/other/IMG_1.cr2", "/photos/IMG_4.png"};
+
+        QCOMPARE(withoutRawDuplicates(files), expected);
     }
 
     void gridCellsMeanOfUniformImage()

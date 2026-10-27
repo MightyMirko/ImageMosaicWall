@@ -183,5 +183,6 @@ QImage applyExifOrientation(const QImage &image, int orientation);
 QImage loadOrientedImage(const QString &filename, QSize minSize = QSize());
 QString suggestedMosaicFileName(const QString &baseImagePath);
 QStringList supportedImageNameFilters();
+QList<QString> withoutRawDuplicates(const QList<QString> &files);
 
 #endif // IMAGEPROCESSOR_H

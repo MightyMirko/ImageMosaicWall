@@ -517,15 +517,24 @@ QImage loadOrientedImage(const QString &filename, QSize minSize)
     return reader.read();
 }
 
-QStringList supportedImageNameFilters()
+namespace
 {
-    // Formats Qt can read that are no photos (vector, icons, documents), and camera RAW:
-    // RAW files are often kept next to a JPEG of the same shot, which would put every
-    // photo into the mosaic twice, and they are slow to decode without a large preview.
-    static const QSet<QByteArray> excluded = {
-        "svg", "svgz", "ico", "cur", "ani", "icns", "pdf", "eps", "epsf", "epsi",
+
+// Camera RAW formats (as reported by Qt's image format plugins, e.g. kimageformats).
+const QSet<QString> &rawSuffixes()
+{
+    static const QSet<QString> suffixes = {
         "3fr", "arw", "cr2", "cr3", "crw", "dcr", "dng", "erf", "fff", "iiq", "k25", "kdc", "mdc", "mef",
         "mos", "mrw", "nef", "nrw", "orf", "pef", "raf", "raw", "rw2", "rwl", "sr2", "srf", "srw", "x3f"};
+    return suffixes;
+}
+
+} // namespace
+
+QStringList supportedImageNameFilters()
+{
+    // Formats Qt can read that are no photos: vector graphics, icons and documents.
+    static const QSet<QByteArray> excluded = {"svg", "svgz", "ico", "cur", "ani", "icns", "pdf", "eps", "epsf", "epsi"};
 
     QStringList filters;
 
@@ -540,6 +549,35 @@ QStringList supportedImageNameFilters()
     filters.removeDuplicates();
     filters.sort();
     return filters;
+}
+
+QList<QString> withoutRawDuplicates(const QList<QString> &files)
+{
+    // Photographers often keep a RAW file next to a JPEG (or HEIC, ...) of the same shot,
+    // which would put every photo into the mosaic twice. Keep the RAW file only when
+    // there is no other file with the same name in the same folder.
+    QSet<QString> nonRawStems;
+
+    for (const QString &file : files)
+    {
+        QFileInfo info(file);
+
+        if (!rawSuffixes().contains(info.suffix().toLower()))
+            nonRawStems.insert(info.dir().filePath(info.completeBaseName()).toLower());
+    }
+
+    QList<QString> result;
+
+    for (const QString &file : files)
+    {
+        QFileInfo info(file);
+        bool isRaw = rawSuffixes().contains(info.suffix().toLower());
+
+        if (!isRaw || !nonRawStems.contains(info.dir().filePath(info.completeBaseName()).toLower()))
+            result << file;
+    }
+
+    return result;
 }
 
 QString suggestedMosaicFileName(const QString &baseImagePath)

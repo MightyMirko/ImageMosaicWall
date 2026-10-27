@@ -207,7 +207,7 @@ void MainWindow::loadImageFolder(QString &path)
 
     connect(scanner, &AsyncDirectoryScanner::finished, this, [=]() {
         qDebug() << "finished scanning";
-        auto imageList = scanner->scannedFiles();
+        auto imageList = withoutRawDuplicates(scanner->scannedFiles());
 
         ui->btnSetImageFolder->setRange(0, imageList.size());
         ui->btnCancel->show();

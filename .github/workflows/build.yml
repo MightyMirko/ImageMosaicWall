@@ -1,0 +1,99 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fedora:
+    name: Linux (Fedora, Qt 6, digiKam plugin)
+    runs-on: ubuntu-latest
+    container: fedora:44
+    steps:
+      - name: Install dependencies
+        run: >
+          dnf install -y --setopt=install_weak_deps=False
+          git cmake ninja-build gcc-c++
+          qt6-qtbase-devel qt6-qttools-devel exiv2-devel digikam-devel
+
+      - uses: actions/checkout@v4
+
+      - name: Build standalone app
+        run: |
+          cmake -S . -B build-app -G Ninja -DBUILD_WITH_QT6=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build-app
+
+      - name: Build digiKam plugin
+        run: |
+          cmake -S . -B build-plugin -G Ninja -DBUILD_WITH_QT6=ON -DENABLE_DPLUGIN=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build-plugin
+
+  ubuntu-qt5:
+    name: Linux (Ubuntu, Qt 5, Exiv2 0.27)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build g++ qtbase5-dev qttools5-dev qttools5-dev-tools libexiv2-dev
+
+      - uses: actions/checkout@v4
+
+      - name: Build standalone app
+        run: |
+          cmake -S . -B build -G Ninja -DBUILD_WITH_QT6=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build
+
+  windows:
+    name: Windows (MSVC, Qt 6)
+    runs-on: windows-latest
+    env:
+      VCPKG_DEFAULT_TRIPLET: x64-windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          arch: win64_msvc2022_64
+          cache: true
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/vcpkg-cache
+          key: vcpkg-exiv2-${{ runner.os }}-v1
+
+      - name: Install Exiv2
+        shell: pwsh
+        env:
+          VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/vcpkg-cache,readwrite
+        run: |
+          New-Item -ItemType Directory -Force -Path "${{ github.workspace }}/vcpkg-cache" | Out-Null
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg" install exiv2
+
+      - name: Build standalone app
+        shell: pwsh
+        run: |
+          cmake -S . -B build -DBUILD_WITH_QT6=ON "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake --build build --config RelWithDebInfo
+
+  macos:
+    name: macOS (Homebrew, Qt 6)
+    runs-on: macos-latest
+    steps:
+      - name: Install dependencies
+        run: brew install qt exiv2
+
+      - uses: actions/checkout@v4
+
+      - name: Build standalone app
+        run: |
+          cmake -S . -B build -DBUILD_WITH_QT6=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo "-DCMAKE_PREFIX_PATH=$(brew --prefix qt);$(brew --prefix exiv2)"
+          cmake --build build

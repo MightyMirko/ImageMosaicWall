@@ -232,6 +232,15 @@ private slots:
         QCOMPARE(withoutRawDuplicates(files), expected);
     }
 
+    void rawFilesPolicy()
+    {
+        QList<QString> files = {"/p/A.JPG", "/p/A.CR2", "/p/B.nef", "/p/C.png"};
+
+        QCOMPARE(applyRawFilesPolicy(files, RawFiles::Always), files);
+        QCOMPARE(applyRawFilesPolicy(files, RawFiles::WithoutCopies), QList<QString>({"/p/A.JPG", "/p/B.nef", "/p/C.png"}));
+        QCOMPARE(applyRawFilesPolicy(files, RawFiles::Never), QList<QString>({"/p/A.JPG", "/p/C.png"}));
+    }
+
     void gridCellsMeanOfUniformImage()
     {
         ImageProcessing processing;

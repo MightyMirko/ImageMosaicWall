@@ -63,6 +63,7 @@ private:
   const ushort m_variations[6] = {0, 1, 3, 9, 11, 15};
   QString m_currentFolder;
   QString m_baseImagePath;
+  QString m_imageFolder;
 };
 
 #endif // MAINWINDOW_H

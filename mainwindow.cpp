@@ -38,6 +38,12 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->sbCols, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::onGridPropsValueChanged);
     connect(ui->btnSetResolution, SIGNAL(clicked(bool)), this, SLOT(onOutputResolutionChanged()));
 
+    // The combo box entries are in the order of the RawFiles values.
+    connect(ui->cbRawFiles, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+        QString folder = m_imageFolder;
+        loadImageFolder(folder);
+    });
+
     connect(ui->btnCancel, &QPushButton::clicked, [&]() {
         qDebug() << "Cancel!";
         m_imageProcessing.processCanceled(true);
@@ -141,6 +147,7 @@ void MainWindow::toggleUI(bool enabled)
     ui->btnLoad->setEnabled(enabled);
     ui->btnSetResolution->setEnabled(enabled);
     ui->btnSetImageFolder->setEnabled(enabled);
+    ui->cbRawFiles->setEnabled(enabled);
 
     ui->sbCols->setEnabled(enabled);
     ui->sbRows->setEnabled(enabled);
@@ -195,6 +202,7 @@ void MainWindow::loadImageFolder(QString &path)
     if (path.isEmpty())
         return;
 
+    m_imageFolder = path;
     QStringList filter = supportedImageNameFilters();
 
     auto scanner = new AsyncDirectoryScanner(
@@ -207,7 +215,7 @@ void MainWindow::loadImageFolder(QString &path)
 
     connect(scanner, &AsyncDirectoryScanner::finished, this, [=]() {
         qDebug() << "finished scanning";
-        auto imageList = withoutRawDuplicates(scanner->scannedFiles());
+        auto imageList = applyRawFilesPolicy(scanner->scannedFiles(), static_cast<RawFiles>(ui->cbRawFiles->currentIndex()));
 
         ui->btnSetImageFolder->setRange(0, imageList.size());
         ui->btnCancel->show();

@@ -132,7 +132,7 @@
             <number>0</number>
            </property>
            <item row="0" column="0">
-            <layout class="QVBoxLayout" name="verticalLayout" stretch="0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0">
+            <layout class="QVBoxLayout" name="verticalLayout" stretch="0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0">
              <property name="spacing">
               <number>10</number>
              </property>
@@ -210,6 +210,40 @@
                <property name="flat">
                 <bool>false</bool>
                </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QComboBox" name="cbRawFiles">
+               <property name="minimumSize">
+                <size>
+                 <width>200</width>
+                 <height>0</height>
+                </size>
+               </property>
+               <property name="maximumSize">
+                <size>
+                 <width>200</width>
+                 <height>16777215</height>
+                </size>
+               </property>
+               <property name="toolTip">
+                <string>How camera RAW files in the image folder are used. Photographers often keep a RAW file and a JPEG of the same shot; with &quot;skip copies&quot; such a shot is used only once.</string>
+               </property>
+               <item>
+                <property name="text">
+                 <string>RAW: skip copies</string>
+                </property>
+               </item>
+               <item>
+                <property name="text">
+                 <string>RAW: always use</string>
+                </property>
+               </item>
+               <item>
+                <property name="text">
+                 <string>RAW: never use</string>
+                </property>
+               </item>
               </widget>
              </item>
              <item>

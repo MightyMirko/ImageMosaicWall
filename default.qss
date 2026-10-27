@@ -111,6 +111,21 @@ QPushButton:pressed, ProgressButton:pressed {
   background-color: #989899;
 }
 
+QComboBox {
+  font-family: 'Source Sans Pro';
+  background-color: #3B4252;
+  border: none;
+  color: #989899;
+  height: 30px;
+  padding: 5px 10px 5px 5px;
+}
+
+QComboBox QAbstractItemView {
+  background-color: #3B4252;
+  color: #989899;
+  selection-background-color: #4c566a;
+}
+
 QSpinBox {
   font-family: 'Source Sans Pro';
   background-color: #3B4252;

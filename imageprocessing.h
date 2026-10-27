@@ -185,4 +185,14 @@ QString suggestedMosaicFileName(const QString &baseImagePath);
 QStringList supportedImageNameFilters();
 QList<QString> withoutRawDuplicates(const QList<QString> &files);
 
+// How camera RAW files in the tile folder are used.
+enum class RawFiles
+{
+    WithoutCopies, // only when no other file of the same shot (e.g. a JPEG) is in the folder
+    Always,
+    Never
+};
+
+QList<QString> applyRawFilesPolicy(const QList<QString> &files, RawFiles policy);
+
 #endif // IMAGEPROCESSOR_H

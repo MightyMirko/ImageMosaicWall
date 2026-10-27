@@ -551,6 +551,30 @@ QStringList supportedImageNameFilters()
     return filters;
 }
 
+QList<QString> applyRawFilesPolicy(const QList<QString> &files, RawFiles policy)
+{
+    switch (policy)
+    {
+        case RawFiles::Always:
+            return files;
+
+        case RawFiles::Never:
+        {
+            QList<QString> result;
+
+            for (const QString &file : files)
+                if (!rawSuffixes().contains(QFileInfo(file).suffix().toLower()))
+                    result << file;
+
+            return result;
+        }
+
+        case RawFiles::WithoutCopies:
+        default:
+            return withoutRawDuplicates(files);
+    }
+}
+
 QList<QString> withoutRawDuplicates(const QList<QString> &files)
 {
     // Photographers often keep a RAW file next to a JPEG (or HEIC, ...) of the same shot,

@@ -40,9 +40,12 @@ MainWindow::MainWindow(QWidget *parent)
 
     // The combo box entries are in the order of the RawFiles values.
     connect(ui->cbRawFiles, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
-        QString folder = m_imageFolder;
-        loadImageFolder(folder);
+        if (!m_tileFiles.isEmpty())
+            loadTileImages(m_tileFiles);
     });
+
+    // Only shown when the host application (the digiKam plugin) provides a tile source.
+    ui->btnTilesFromHost->hide();
 
     connect(ui->btnCancel, &QPushButton::clicked, [&]() {
         qDebug() << "Cancel!";
@@ -148,6 +151,7 @@ void MainWindow::toggleUI(bool enabled)
     ui->btnSetResolution->setEnabled(enabled);
     ui->btnSetImageFolder->setEnabled(enabled);
     ui->cbRawFiles->setEnabled(enabled);
+    ui->btnTilesFromHost->setEnabled(enabled);
 
     ui->sbCols->setEnabled(enabled);
     ui->sbRows->setEnabled(enabled);
@@ -202,7 +206,6 @@ void MainWindow::loadImageFolder(QString &path)
     if (path.isEmpty())
         return;
 
-    m_imageFolder = path;
     QStringList filter = supportedImageNameFilters();
 
     auto scanner = new AsyncDirectoryScanner(
@@ -215,31 +218,53 @@ void MainWindow::loadImageFolder(QString &path)
 
     connect(scanner, &AsyncDirectoryScanner::finished, this, [=]() {
         qDebug() << "finished scanning";
-        auto imageList = applyRawFilesPolicy(scanner->scannedFiles(), static_cast<RawFiles>(ui->cbRawFiles->currentIndex()));
-
-        ui->btnSetImageFolder->setRange(0, imageList.size());
-        ui->btnCancel->show();
-
-        QFutureWatcher<void> *watcher = new QFutureWatcher<void>(this);
-        QFuture<void> f = QtConcurrent::run([=]() {
-            m_imageProcessing.processMosaicImages(imageList);
-            if (!m_imageProcessing.skipBackgroundProcesses())
-                ui->btnGenerate->setEnabled(m_imageProcessing.isReady());
-        });
-
-        connect(watcher, &QFutureWatcher<void>::finished, [=]() {
-            watcher->deleteLater();
-            updateStatus();
-            toggleUI(true);
-        });
-
-        toggleUI(false);
-        m_imageProcessing.processCanceled(false);
-        watcher->setFuture(f);
+        loadTileImages(scanner->scannedFiles());
         scanner->deleteLater();
     });
 
     scanner->start();
+}
+
+void MainWindow::loadTileImages(const QList<QString> &files)
+{
+    // Kept so a change of the RAW choice can be applied without scanning again.
+    m_tileFiles = files;
+
+    auto imageList = applyRawFilesPolicy(files, static_cast<RawFiles>(ui->cbRawFiles->currentIndex()));
+
+    ui->btnSetImageFolder->setRange(0, qMax(1, int(imageList.size())));
+    ui->btnCancel->show();
+
+    QFutureWatcher<void> *watcher = new QFutureWatcher<void>(this);
+    QFuture<void> f = QtConcurrent::run([=]() { m_imageProcessing.processMosaicImages(imageList); });
+
+    connect(watcher, &QFutureWatcher<void>::finished, this, [=]() {
+        watcher->deleteLater();
+        updateStatus();
+        toggleUI(true);
+    });
+
+    toggleUI(false);
+    m_imageProcessing.processCanceled(false);
+    watcher->setFuture(f);
+}
+
+void MainWindow::setTileSource(const QString &text, std::function<QList<QString>()> chooseFiles)
+{
+    m_chooseTileFiles = chooseFiles;
+    ui->btnTilesFromHost->setText(text);
+    ui->btnTilesFromHost->setVisible(bool(chooseFiles));
+}
+
+void MainWindow::on_btnTilesFromHost_clicked()
+{
+    if (!m_chooseTileFiles)
+        return;
+
+    QList<QString> files = m_chooseTileFiles();
+
+    if (!files.isEmpty())
+        loadTileImages(files);
 }
 
 void MainWindow::scaleLockedImageSize(bool senderIsWidth)

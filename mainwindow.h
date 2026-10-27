@@ -10,6 +10,7 @@
 #include <QMovie>
 #include <QPushButton>
 #include <QtConcurrent>
+#include <functional>
 
 namespace Ui {
 class MainWindow;
@@ -24,11 +25,16 @@ public:
 
   void setCurrentFolder(const QString &folder);
 
+  // Adds a button that loads tile images from the host application, e.g. digiKam's
+  // albums and tags. chooseFiles returns the chosen files, or nothing if cancelled.
+  void setTileSource(const QString &text, std::function<QList<QString>()> chooseFiles);
+
 private:
   void updateStatus();
   void toggleUI(bool enabled);
   void loadImage(QString &);
   void loadImageFolder(QString &);
+  void loadTileImages(const QList<QString> &files);
   void scaleLockedImageSize(bool senderIsWidth);
 
 signals:
@@ -48,6 +54,7 @@ private slots:
   void on_btnGenerate_clicked();
   void on_btnSave_clicked();
   void on_btnSetImageFolder_clicked();
+  void on_btnTilesFromHost_clicked();
 
 private:
   Ui::MainWindow *ui;
@@ -63,7 +70,8 @@ private:
   const ushort m_variations[6] = {0, 1, 3, 9, 11, 15};
   QString m_currentFolder;
   QString m_baseImagePath;
-  QString m_imageFolder;
+  QList<QString> m_tileFiles;
+  std::function<QList<QString>()> m_chooseTileFiles;
 };
 
 #endif // MAINWINDOW_H

@@ -29,6 +29,9 @@
 #include <QList>
 #include <QUrl>
 #include <QFontDatabase>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QVBoxLayout>
 
 // digiKam includes
 
@@ -129,6 +132,54 @@ void ImageMosaicWallPlugin::slotImageMosaicWall()
         MainWindow* const dlg = new MainWindow();
         dlg->setCurrentFolder(currFolder);
         dlg->onImageDropped(topImage);
+
+        if (iface->supportAlbums())
+        {
+            // digiKam creates the album chooser once per interface and keeps a plain
+            // pointer to it, so the dialog holding it must stay alive as long as the
+            // window: it is created once here and only shown and hidden afterwards.
+
+            QDialog* const chooser = new QDialog(dlg);
+            chooser->setWindowTitle(tr("Tiles from digiKam"));
+
+            QVBoxLayout* const layout     = new QVBoxLayout(chooser);
+            QDialogButtonBox* const btns  = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, chooser);
+            layout->addWidget(iface->albumChooser(chooser));
+            layout->addWidget(btns);
+            chooser->resize(500, 600);
+
+            connect(btns, &QDialogButtonBox::accepted, chooser, &QDialog::accept);
+            connect(btns, &QDialogButtonBox::rejected, chooser, &QDialog::reject);
+
+            dlg->setTileSource(tr("Tiles from digiKam"), [iface, chooser]()
+                {
+                    QList<QString> files;
+
+                    if (chooser->exec() != QDialog::Accepted)
+                    {
+                        return files;
+                    }
+
+                    // Albums, tags (including people), searches and labels; a photo can be
+                    // in several of the selected ones.
+
+                    const QList<QUrl> urls = iface->albumsItems(iface->albumChooserItems());
+
+                    for (const QUrl& url : urls)
+                    {
+                        if (url.isLocalFile())
+                        {
+                            files << url.toLocalFile();
+                        }
+                    }
+
+                    files.removeDuplicates();
+
+                    return files;
+                }
+            );
+        }
+
         dlg->show();
     }
 }

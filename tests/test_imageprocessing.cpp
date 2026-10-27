@@ -113,6 +113,16 @@ private slots:
         exifImage->writeMetadata();
 
         QCOMPARE(loadOrientedImage(path).size(), QSize(40, 60));
+
+        // Decoding at reduced size must cover the requested size in display
+        // orientation and keep the aspect ratio, also for rotated images.
+        QImage reduced = loadOrientedImage(path, QSize(10, 30));
+        QVERIFY2(reduced.width() >= 10 && reduced.height() >= 30, qPrintable(QString("%1x%2").arg(reduced.width()).arg(reduced.height())));
+        QVERIFY(reduced.height() < 60);
+        QVERIFY(qAbs(double(reduced.width()) / reduced.height() - 40.0 / 60.0) < 0.05);
+
+        // Never scaled up.
+        QCOMPARE(loadOrientedImage(path, QSize(400, 400)).size(), QSize(40, 60));
     }
 
     // The save dialog must never suggest the base image itself (issue #1).

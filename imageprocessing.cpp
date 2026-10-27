@@ -7,6 +7,7 @@
 #include <QFileInfo>
 #include <QImage>
 #include <QImageReader>
+#include <QtMath>
 #include <exiv2/exiv2.hpp>
 #include <exiv2/exv_conf.h>
 #include <exiv2/version.hpp>
@@ -192,7 +193,8 @@ void ImageProcessing::calculateImageMeanMap(const QList<QString> imageList)
 
         QImage image = extractThumbnail(imageFileName, QSize(128, 128));
         if (image.isNull())
-            image = loadOrientedImage(imageFileName).scaled(QSize(128, 128), Qt::IgnoreAspectRatio, Qt::FastTransformation);
+            image = loadOrientedImage(imageFileName, QSize(128, 128))
+                        .scaled(QSize(128, 128), Qt::IgnoreAspectRatio, Qt::FastTransformation);
 
         if (image.isNull())
             return;
@@ -314,7 +316,7 @@ void ImageProcessing::calculateMosaicPositions(const QSize gridSize, const int s
 
         QImage image = extractThumbnail(imagePath, cellSize);
         if (image.isNull())
-            image = loadOrientedImage(imagePath);
+            image = loadOrientedImage(imagePath, cellSize);
 
         // Fill the cell and crop the overflow evenly from both sides, keeping the center.
         QImage scaled = image.scaled(cellSize, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
@@ -451,10 +453,28 @@ QImage applyExifOrientation(const QImage &image, int orientation)
     return image.transformed(transform);
 }
 
-QImage loadOrientedImage(const QString &filename)
+QImage loadOrientedImage(const QString &filename, QSize minSize)
 {
     QImageReader reader(filename);
     reader.setAutoTransform(true);
+
+    // Decode at the smallest size that still covers minSize. For JPEG this lets the
+    // decoder skip most of the work (DCT scaling), much faster than decoding a camera
+    // photo at full size and scaling it down afterwards.
+    QSize size = reader.size();
+
+    if (!minSize.isEmpty() && size.isValid())
+    {
+        // The scaled size applies to the image as stored, before the Exif rotation.
+        if (reader.transformation() & QImageIOHandler::TransformationRotate90)
+            minSize.transpose();
+
+        double scale = qMax(double(minSize.width()) / size.width(), double(minSize.height()) / size.height());
+
+        if (scale < 1.0)
+            reader.setScaledSize(QSize(qCeil(size.width() * scale), qCeil(size.height() * scale)));
+    }
+
     return reader.read();
 }
 

@@ -171,7 +171,7 @@ inline ColorLab toLab(QColor &color)
 
 QImage extractThumbnail(const QString, QSize);
 QImage applyExifOrientation(const QImage &image, int orientation);
-QImage loadOrientedImage(const QString &filename);
+QImage loadOrientedImage(const QString &filename, QSize minSize = QSize());
 QString suggestedMosaicFileName(const QString &baseImagePath);
 
 #endif // IMAGEPROCESSOR_H

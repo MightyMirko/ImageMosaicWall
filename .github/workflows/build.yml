@@ -43,7 +43,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake ninja-build g++ qtbase5-dev qttools5-dev qttools5-dev-tools libexiv2-dev
+          sudo apt-get install -y --no-install-recommends cmake ninja-build g++ qtbase5-dev qttools5-dev qttools5-dev-tools libqt5sql5-sqlite libexiv2-dev
 
       - uses: actions/checkout@v4
 

@@ -50,6 +50,7 @@ if(BUILD_WITH_QT6)
                  Widgets
                  Gui
                  Concurrent
+                 Sql
     )
 
     set(QT_VERSION_MAJOR 6)
@@ -62,6 +63,7 @@ else()
                  Widgets
                  Gui
                  Concurrent
+                 Sql
     )
 
     set(QT_VERSION_MAJOR 5)
@@ -114,6 +116,7 @@ set(imagemosaicwall_core_SRCS ${CMAKE_SOURCE_DIR}/mainwindow.cpp
                               ${CMAKE_SOURCE_DIR}/imageprocessing.cpp
                               ${CMAKE_SOURCE_DIR}/progressbutton.cpp
                               ${CMAKE_SOURCE_DIR}/asyncdirectoryscanner.cpp
+                              ${CMAKE_SOURCE_DIR}/tilecache.cpp
                               ${i18n_QRC_SRCS}
                               ${i18n_QM}
 )
@@ -146,6 +149,7 @@ add_library(imagemosaicwallcore STATIC ${libimagemosaicwall_core_SRCS})
 target_link_libraries(imagemosaicwallcore
                       PUBLIC
                       ${exiv2lib_LIBRARIES}
+                      Qt${QT_VERSION_MAJOR}::Sql
 )
 
 if(NOT MSVC)

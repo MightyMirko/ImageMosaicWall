@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <QDateTime>
 #include <QDebug>
 #include <QDir>
 #include <QFileInfo>
@@ -53,7 +54,14 @@ ImageProcessing::~ImageProcessing()
 void ImageProcessing::processMosaicImages(const QList<QString> &imageList)
 {
     m_imageMeanMap.clear();
-    calculateImageMeanMap(imageList);
+    m_newCacheEntries.clear();
+    m_cacheHits = 0;
+
+    // Only files that are new or changed since the last run are read again.
+    TileCache cache(m_cacheFile.isEmpty() ? TileCache::defaultFileName() : m_cacheFile);
+    calculateImageMeanMap(imageList, cache.load());
+    cache.store(m_newCacheEntries);
+    m_newCacheEntries.clear();
 
     // The search in calculateMosaicPositions() compares every image with every cell.
     // Convert the mean colors to Lab once here instead of for every cell, and keep
@@ -186,11 +194,30 @@ void ImageProcessing::calculateGridCellsMean(const QImage &baseImage,
     }
 }
 
-void ImageProcessing::calculateImageMeanMap(const QList<QString> imageList)
+void ImageProcessing::calculateImageMeanMap(const QList<QString> imageList,
+                                            const QHash<QString, TileCache::Entry> &cached)
 {
     std::function<void(const QString)> scale = [&](const QString imageFileName) {
         if (m_skipBackgroundProcess)
             return;
+
+        QFileInfo info(imageFileName);
+        qint64 size = info.size();
+        qint64 mtime = info.lastModified().toMSecsSinceEpoch();
+
+        auto hit = cached.constFind(imageFileName);
+
+        if (hit != cached.constEnd() && hit->size == size && hit->mtime == mtime)
+        {
+            {
+                QMutexLocker lock(&m_lockMean);
+                m_imageMeanMap.insert(imageFileName, QColor(hit->color));
+            }
+
+            ++m_cacheHits;
+            emit imageProcessed(imageFileName);
+            return;
+        }
 
         QImage image = extractThumbnail(imageFileName, QSize(128, 128));
         if (image.isNull())
@@ -231,6 +258,7 @@ void ImageProcessing::calculateImageMeanMap(const QList<QString> imageList)
             QMutexLocker lock(&m_lockMean);
             auto color = QColor(meanR, meanG, meanB);
             m_imageMeanMap.insert(imageFileName, color);
+            m_newCacheEntries.append({imageFileName, TileCache::Entry{size, mtime, color.rgb()}});
         }
         emit imageProcessed(imageFileName);
     };
@@ -359,6 +387,16 @@ double ImageProcessing::calculateDistance(ColorLab rhs, ColorLab lhs) const
 QMap<QString, QColor> ImageProcessing::getImageMeanMap() const
 {
     return m_imageMeanMap;
+}
+
+void ImageProcessing::setCacheFile(const QString &fileName)
+{
+    m_cacheFile = fileName;
+}
+
+int ImageProcessing::cacheHits() const
+{
+    return m_cacheHits;
 }
 
 bool ImageProcessing::skipBackgroundProcesses() const

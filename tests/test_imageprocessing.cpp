@@ -1,7 +1,10 @@
 #include "imageprocessing.h"
 
 #include <QColor>
+#include <QDateTime>
 #include <QDir>
+#include <QFile>
+#include <QStandardPaths>
 #include <QImage>
 #include <QImageReader>
 #include <QTemporaryDir>
@@ -56,7 +59,13 @@ private:
     }
 
 private slots:
-    void initTestCase() { QVERIFY(m_dir.isValid()); }
+    void initTestCase()
+    {
+        QVERIFY(m_dir.isValid());
+
+        // Keeps the default tile cache out of the user's real cache directory.
+        QStandardPaths::setTestModeEnabled(true);
+    }
 
     void exifOrientationMatchesQt_data()
     {
@@ -157,6 +166,58 @@ private slots:
         QVERIFY(!filters.contains("*.ico"));
         QVERIFY(!filters.contains("*.nef"));
         QCOMPARE(filters.removeDuplicates(), 0);
+    }
+
+    // Unchanged files come from the cache; a changed file is analysed again (issue #4).
+    void cacheReusesUnchangedFiles()
+    {
+        QString cacheFile = m_dir.filePath("cache/tiles.sqlite");
+        QString red = saveImage("cache-red.png", solidImage(QSize(16, 16), Qt::red));
+        QString blue = saveImage("cache-blue.png", solidImage(QSize(16, 16), Qt::blue));
+
+        {
+            ImageProcessing first;
+            first.setCacheFile(cacheFile);
+            first.processMosaicImages({red, blue});
+            QCOMPARE(first.cacheHits(), 0);
+        }
+
+        {
+            ImageProcessing second;
+            second.setCacheFile(cacheFile);
+            second.processMosaicImages({red, blue});
+            QCOMPARE(second.cacheHits(), 2);
+            QVERIFY(similar(second.getImageMeanMap().value(red), Qt::red, 0));
+            QVERIFY(similar(second.getImageMeanMap().value(blue), Qt::blue, 0));
+        }
+
+        // Same path, new content and a newer modification time.
+        saveImage("cache-red.png", solidImage(QSize(16, 16), Qt::green));
+        QFile changed(red);
+        QVERIFY(changed.open(QIODevice::ReadWrite));
+        QVERIFY(changed.setFileTime(QDateTime::currentDateTime().addSecs(60), QFileDevice::FileModificationTime));
+        changed.close();
+
+        {
+            ImageProcessing third;
+            third.setCacheFile(cacheFile);
+            third.processMosaicImages({red, blue});
+            QCOMPARE(third.cacheHits(), 1);
+            QVERIFY(similar(third.getImageMeanMap().value(red), Qt::green, 0));
+        }
+    }
+
+    // A cache that can't be created must not stop the analysis.
+    void unusableCacheStillWorks()
+    {
+        QString image = saveImage("nocache.png", solidImage(QSize(16, 16), Qt::red));
+
+        ImageProcessing processing;
+        processing.setCacheFile(image + "/not-a-directory/tiles.sqlite");
+        processing.processMosaicImages({image});
+
+        QCOMPARE(processing.cacheHits(), 0);
+        QVERIFY(similar(processing.getImageMeanMap().value(image), Qt::red, 0));
     }
 
     void gridCellsMeanOfUniformImage()

@@ -10,6 +10,7 @@
 #include <QPainter>
 #include <QPoint>
 #include <QtConcurrent>
+#include "tilecache.h"
 
 struct ColorXYZ
 {
@@ -56,6 +57,11 @@ public:
     bool generateImage(QSize, QSize, int);
     bool isReady();
 
+    // Where analysed tile images are cached; empty means TileCache::defaultFileName().
+    void setCacheFile(const QString &fileName);
+    // Number of images taken from the cache by the last processMosaicImages().
+    int cacheHits() const;
+
 signals:
     void mosaicGenerated(const GridPoint);
     void cellProcessed(const int cellIndex);
@@ -63,7 +69,7 @@ signals:
 
 private:
     void calculateGridCellsMean(const QImage &, const QSize &, std::vector<QColor> &, int, int);
-    void calculateImageMeanMap(const QList<QString>);
+    void calculateImageMeanMap(const QList<QString>, const QHash<QString, TileCache::Entry> &cached);
     void calculateMosaicPositions(const QSize, const int, const int);
     double calculateDistance(QColor rhs, QColor lhs) const;
     double calculateDistance(ColorLab rhs, ColorLab lhs) const;
@@ -87,6 +93,9 @@ private:
     qsizetype m_outputBytesPerLine = 0;
     std::atomic<bool> m_skipBackgroundProcess;
     int m_historySize;
+    QString m_cacheFile;
+    std::atomic<int> m_cacheHits{0};
+    QList<QPair<QString, TileCache::Entry>> m_newCacheEntries;
 };
 
 /**

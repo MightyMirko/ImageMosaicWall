@@ -75,6 +75,10 @@ ctest --test-dir build --output-on-failure
 
 The tests run without a display.
 
+# Tile cache
+
+The analysis of the tile images is cached in a small SQLite database, so setting the same folder again only reads new or changed files. Inside digiKam it is stored in `~/.cache/digikam/imagemosaicwall/tiles.sqlite` on Linux (the standalone app uses its own cache folder). It is safe to delete; it is rebuilt on the next run.
+
 # Roadmap
 
 Planned work is organised in [milestones](https://github.com/MightyMirko/ImageMosaicWall/milestones). Bug reports and ideas are welcome in the [issues](https://github.com/MightyMirko/ImageMosaicWall/issues).

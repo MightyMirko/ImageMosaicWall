@@ -83,6 +83,7 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
 
     m_gridMapCache.clear();
 
+    QList<QFuture<void>> jobs;
     int numCellsPerThread = itemsPerThread;
     for (int t = 0; t < maxThreads; ++t)
     {
@@ -93,19 +94,21 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
 
 #if (QT_VERSION >= QT_VERSION_CHECK(6, 0, 0))
 
-        QtConcurrent::run(
+        jobs << QtConcurrent::run(
             &pool, &ImageProcessing::calculateMosaicPositions, this, gridSize, t * itemsPerThread, numCellsPerThread);
 
 #else
 
-        QtConcurrent::run(
+        jobs << QtConcurrent::run(
             &pool, this, &ImageProcessing::calculateMosaicPositions, gridSize, t * itemsPerThread, numCellsPerThread);
 
 #endif
 
     }
 
-    pool.waitForDone();
+    for (auto &job : jobs)
+        job.waitForFinished();
+
     return true;
 }
 
@@ -362,6 +365,7 @@ void ImageProcessing::processGrid(const QImage &baseImage, QSize gridSize)
 
     m_gridColorMap.resize(numCells);
 
+    QList<QFuture<void>> jobs;
     int numCellsPerThread = itemsPerThread;
     for (int t = 0; t < maxThreads; ++t)
     {
@@ -374,10 +378,11 @@ void ImageProcessing::processGrid(const QImage &baseImage, QSize gridSize)
             this->calculateGridCellsMean(baseImage, gridSize, m_gridColorMap, t * itemsPerThread, numCellsPerThread);
         };
 
-        QtConcurrent::run(&pool, meanFnc);
+        jobs << QtConcurrent::run(&pool, meanFnc);
     }
 
-    pool.waitForDone();
+    for (auto &job : jobs)
+        job.waitForFinished();
 }
 
 std::vector<QColor> ImageProcessing::getGridColorMap() const

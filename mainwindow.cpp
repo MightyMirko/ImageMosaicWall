@@ -25,9 +25,10 @@ MainWindow::MainWindow(QWidget *parent)
     s_loadI18n(QLatin1String("ImageMosaicWall"));
 
     QFile file(":/styles/default.qss");
-    file.open(QFile::ReadOnly);
-    QString styleSheet = QLatin1String(file.readAll());
-    setStyleSheet(styleSheet);
+    if (file.open(QFile::ReadOnly))
+        setStyleSheet(QLatin1String(file.readAll()));
+    else
+        qWarning() << "Could not load the style sheet" << file.fileName();
 
     ui->btnCancel->hide();
     ui->wImageContainer->layout()->addWidget(&m_imageView);

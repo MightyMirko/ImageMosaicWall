@@ -399,12 +399,35 @@ void MainWindow::on_btnSave_clicked()
         return;
     }
 
-    if (!out->save(filename))
-    {
-        QMessageBox::warning(this,
-                             tr("Save Mosaic Image"),
-                             tr("The mosaic could not be saved to %1.").arg(QDir::toNativeSeparators(filename)));
-    }
+    // Save in the background: encoding a large mosaic, or waiting for a sleeping
+    // disk to spin up, would otherwise freeze the whole window (and digiKam).
+    QImage image = *out;
+    QString nativeName = QDir::toNativeSeparators(filename);
+
+    toggleUI(false);
+    ui->lblStatus->setText(tr("Saving %1 ...").arg(nativeName));
+
+    auto watcher = new QFutureWatcher<bool>(this);
+
+    connect(watcher, &QFutureWatcher<bool>::finished, this, [=]() {
+        bool saved = watcher->result();
+        watcher->deleteLater();
+        toggleUI(true);
+
+        if (saved)
+        {
+            ui->lblStatus->setText(tr("Saved to %1").arg(nativeName));
+        }
+        else
+        {
+            ui->lblStatus->clear();
+            QMessageBox::warning(this,
+                                 tr("Save Mosaic Image"),
+                                 tr("The mosaic could not be saved to %1.").arg(nativeName));
+        }
+    });
+
+    watcher->setFuture(QtConcurrent::run([image, filename]() { return image.save(filename); }));
 }
 
 void MainWindow::on_btnSetImageFolder_clicked()

@@ -12,25 +12,69 @@ This application allows you to create an image based on a bunch of other images.
 
 # Dependencies
 
-- Qt5 or later.
-- CMake 3.x.
-- Exiv2 0.27.x or later.
-- digiKam 8.x plugin interface. <https://www.digikam.org> (optional)
+- Qt 6.5 or later (Qt 5 still builds), with the Linguist tools for the translations.
+- CMake 3.16 or later.
+- Exiv2 0.27 or later.
+- For the digiKam plugin: digiKam 8 or later and its development files.
 
-# Compiling and Installing
+On Fedora:
 
-- mdkir build
-- cd build
-- cmake . -DCMAKE_INSTALL_PREFIX=/usr ..                            (stand alone version only)
-- cmake . -DCMAKE_INSTALL_PREFIX=/usr -DENABLE_DPLUGIN ..           (stand alone version and digiKam plugin)
-- make
-- make install/fast
+```sh
+sudo dnf install cmake gcc-c++ qt6-qtbase-devel qt6-qttools-devel exiv2-devel
+sudo dnf install digikam-devel   # only for the digiKam plugin
+```
 
-## TODO's
+On Ubuntu 24.04 with Qt 5:
 
-- [x] Drag & Drop for a single image
-- [x] a better history algorithm (something like a kernel which checks the neighborhood in (x - n) and (y - n) direction to be unique)
-- [x] floating point precision bug - there is something wrong with some grid resolutions and the output image. It contains blank pixels at the and of the image. But otherwise if I use floating point numbers there are gaps between the mosaic images)
-- [x] TravisCI configuration for building this app for OS X, Linux ~~and maybe Windows~~?
-- [x] loading indicator for "Load Base Image" & "Set Image Folder"
-- [x] extract Thumbnails from Exif instead down sampling the whole image
+```sh
+sudo apt install cmake g++ qtbase5-dev qttools5-dev qttools5-dev-tools libexiv2-dev
+```
+
+The Windows (MSVC, Qt from the Qt installer, Exiv2 from vcpkg) and macOS (Homebrew) builds are set up in [`.github/workflows/build.yml`](.github/workflows/build.yml).
+
+# Building
+
+## Standalone app
+
+```sh
+cmake -S . -B build -DBUILD_WITH_QT6=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build
+./build/ImageMosaicWall
+```
+
+Use `-DBUILD_WITH_QT6=OFF` to build with Qt 5.
+
+## digiKam plugin
+
+`-DENABLE_DPLUGIN=ON` builds only the plugin, not the standalone app:
+
+```sh
+cmake -S . -B build -DBUILD_WITH_QT6=ON -DENABLE_DPLUGIN=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build
+```
+
+To try it without installing, start digiKam with `DK_PLUGIN_PATH`. The variable replaces digiKam's plugin folder instead of adding to it, so list the system folder as well (the path below is Fedora's; check where your distribution puts `Generic_*_Plugin.so`):
+
+```sh
+DK_PLUGIN_PATH="/usr/lib64/qt6/plugins/digikam/;$PWD/build/" digikam
+```
+
+The tool then appears in the Tools menu as "Image Mosaic Wall". To install it for good:
+
+```sh
+sudo cmake --install build
+```
+
+## Tests
+
+```sh
+cmake -S . -B build -DBUILD_WITH_QT6=ON -DBUILD_TESTING=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+The tests run without a display.
+
+# Roadmap
+
+Planned work is organised in [milestones](https://github.com/MightyMirko/ImageMosaicWall/milestones). Bug reports and ideas are welcome in the [issues](https://github.com/MightyMirko/ImageMosaicWall/issues).

@@ -148,7 +148,7 @@ QComboBox QAbstractItemView {
   selection-background-color: #4c566a;
 }
 
-QSpinBox {
+QSpinBox, QDoubleSpinBox {
   font-family: 'Source Sans Pro';
   background-color: #3B4252;
   border: none;
@@ -157,11 +157,11 @@ QSpinBox {
   padding: 5px 10px 5px 5px;
 }
 
-QSpinBox:disabled, QComboBox:disabled {
+QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {
   color: #5d6677;
 }
 
-QSpinBox::down-button, QSpinBox::up-button {
+QSpinBox::down-button, QSpinBox::up-button, QDoubleSpinBox::down-button, QDoubleSpinBox::up-button {
   color: #989899;
   background-color: #98abb2;
   width: 20px;
@@ -169,21 +169,21 @@ QSpinBox::down-button, QSpinBox::up-button {
   border-width: 1px;
 }
 
-QSpinBox::down-button {
+QSpinBox::down-button, QDoubleSpinBox::down-button {
   border-top: 1px solid #515151;
 }
 
-QSpinBox::down-arrow, QSpinBox::up-arrow  {
+QSpinBox::down-arrow, QSpinBox::up-arrow, QDoubleSpinBox::down-arrow, QDoubleSpinBox::up-arrow {
   color: #515151;
   width: 10px;
   height: 10px;
 }
 
-QSpinBox::up-arrow {
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
   image: url(:/icons/assets/up.png);
 }
 
-QSpinBox::down-arrow {
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
   image: url(:/icons/assets/down.png);
 }
 

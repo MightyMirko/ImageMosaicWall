@@ -7,6 +7,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFutureWatcher>
+#include <QLocale>
 #include <QMessageBox>
 #include <QSettings>
 #include <QString>
@@ -53,7 +54,34 @@ MainWindow::MainWindow(QWidget *parent)
     // With a fixed tile shape the rows follow from the columns.
     connect(ui->sbCols, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::applyTileShape);
     connect(ui->cbTileShape, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::applyTileShape);
-    connect(ui->btnSetResolution, SIGNAL(clicked(bool)), this, SLOT(onOutputResolutionChanged()));
+
+    // The output size in pixels and as printed are kept in step; the tile size shown
+    // below them follows the grid.
+    connect(ui->sbPrintWidth, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+            [this]() { setPixelsFromPrintSize(true); });
+    connect(ui->sbPrintHeight, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+            [this]() { setPixelsFromPrintSize(false); });
+    connect(ui->sbDpi, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int dpi) {
+        // A new resolution keeps the print size and changes the pixels; scaled from the
+        // pixels, as the shown print size is rounded.
+        double factor = double(dpi) / m_dpi;
+        m_dpi = dpi;
+        int width = qMax(1, qRound(ui->sbWidth->value() * factor));
+        int height = qMax(1, qRound(ui->sbHeight->value() * factor));
+
+        ui->sbWidth->blockSignals(true);
+        ui->sbHeight->blockSignals(true);
+        ui->sbWidth->setValue(width);
+        ui->sbHeight->setValue(height);
+        ui->sbWidth->blockSignals(false);
+        ui->sbHeight->blockSignals(false);
+
+        outputSizeChanged();
+    });
+    connect(ui->cbPrintUnit, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::updatePrintSize);
+    connect(ui->sbRows, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::updateOutputInfo);
+    connect(ui->sbCols, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::updateOutputInfo);
+    connect(ui->cbTileShape, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::updateOutputInfo);
 
     // The combo box entries are in the order of the RawFiles values.
     connect(ui->cbRawFiles, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
@@ -92,6 +120,8 @@ MainWindow::MainWindow(QWidget *parent)
             scaleLockedImageSize(true);
             ui->sbHeight->blockSignals(false);
         }
+
+        outputSizeChanged();
     });
     connect(ui->sbHeight, QOverload<int>::of(&QSpinBox::valueChanged), [=]() {
         if (ui->btnLockRatio->isChecked())
@@ -100,6 +130,8 @@ MainWindow::MainWindow(QWidget *parent)
             scaleLockedImageSize(false);
             ui->sbWidth->blockSignals(false);
         }
+
+        outputSizeChanged();
     });
 
     connect(ui->slHistory, QOverload<int>::of(&QSlider::valueChanged), [=]() {
@@ -164,6 +196,12 @@ void MainWindow::loadSettings()
     ui->sbRows->setValue(settings.value("GridRows", ui->sbRows->value()).toInt());
     ui->sbCols->setValue(settings.value("GridColumns", ui->sbCols->value()).toInt());
     comboIndex(ui->cbTileShape, "TileShape");
+    comboIndex(ui->cbPrintUnit, "PrintUnit");
+    ui->sbDpi->blockSignals(true);
+    ui->sbDpi->setValue(settings.value("Dpi", ui->sbDpi->value()).toInt());
+    ui->sbDpi->blockSignals(false);
+    m_dpi = ui->sbDpi->value();
+    updatePrintSize();
 
     m_lastImageFolder = settings.value("LastImageFolder").toString();
     m_lastTileFolder = settings.value("LastTileFolder").toString();
@@ -183,6 +221,8 @@ void MainWindow::saveSettings() const
     settings.setValue("GridRows", ui->sbRows->value());
     settings.setValue("GridColumns", ui->sbCols->value());
     settings.setValue("TileShape", ui->cbTileShape->currentIndex());
+    settings.setValue("PrintUnit", ui->cbPrintUnit->currentIndex());
+    settings.setValue("Dpi", ui->sbDpi->value());
 
     settings.setValue("LastImageFolder", m_lastImageFolder);
     settings.setValue("LastTileFolder", m_lastTileFolder);
@@ -222,9 +262,6 @@ void MainWindow::updateStatus()
 
     ui->lblStatus->setText(QString("%1<br/>%2").arg(imageInfo).arg(folderInfo));
 
-    if (!m_baseImage.isNull())
-        ui->btnSetResolution->setEnabled(true);
-
     ui->btnCancel->hide();
 }
 
@@ -235,7 +272,6 @@ void MainWindow::toggleUI(bool enabled)
     ui->btnSave->setEnabled(enabled && out != nullptr);
 
     ui->btnLoad->setEnabled(enabled);
-    ui->btnSetResolution->setEnabled(enabled);
     ui->btnSetImageFolder->setEnabled(enabled);
     ui->cbRawFiles->setEnabled(enabled);
     ui->btnTilesFromHost->setEnabled(enabled);
@@ -245,6 +281,10 @@ void MainWindow::toggleUI(bool enabled)
     ui->cbTileShape->setEnabled(enabled);
     ui->sbHeight->setEnabled(enabled);
     ui->sbWidth->setEnabled(enabled);
+    ui->sbPrintWidth->setEnabled(enabled);
+    ui->sbPrintHeight->setEnabled(enabled);
+    ui->cbPrintUnit->setEnabled(enabled);
+    ui->sbDpi->setEnabled(enabled);
     ui->slHistory->setEnabled(enabled);
     ui->sbMaxUses->setEnabled(enabled);
     ui->cbEveryPhoto->setEnabled(enabled);
@@ -365,6 +405,10 @@ void MainWindow::on_btnTilesFromHost_clicked()
 
 void MainWindow::scaleLockedImageSize(bool senderIsWidth)
 {
+    // Nothing to keep before an image was loaded or the lock was set.
+    if (m_lockedResolution.isEmpty())
+        return;
+
     double n = qMax(m_lockedResolution.width(), m_lockedResolution.height());
     double d = qMin(m_lockedResolution.width(), m_lockedResolution.height());
     double ratio = n / d;
@@ -372,16 +416,16 @@ void MainWindow::scaleLockedImageSize(bool senderIsWidth)
     if (ui->sbWidth->value() >= ui->sbHeight->value())
     {
         if (senderIsWidth)
-            ui->sbHeight->setValue(ui->sbWidth->value() / ratio);
+            ui->sbHeight->setValue(qRound(ui->sbWidth->value() / ratio));
         else
-            ui->sbWidth->setValue(ui->sbHeight->value() * ratio);
+            ui->sbWidth->setValue(qRound(ui->sbHeight->value() * ratio));
     }
     else
     {
         if (senderIsWidth)
-            ui->sbHeight->setValue(ui->sbWidth->value() * ratio);
+            ui->sbHeight->setValue(qRound(ui->sbWidth->value() * ratio));
         else
-            ui->sbWidth->setValue(ui->sbHeight->value() / ratio);
+            ui->sbWidth->setValue(qRound(ui->sbHeight->value() / ratio));
     }
 }
 
@@ -399,7 +443,7 @@ void MainWindow::applyTileShape()
     // The spin box keeps the rows within its range, so with extreme image shapes the
     // tiles get close to, but not exactly, the chosen shape.
     if (aspect > 0.0 && !m_baseImage.isNull())
-        ui->sbRows->setValue(rowsForTileAspect(m_baseImage.size(), ui->sbCols->value(), aspect));
+        ui->sbRows->setValue(rowsForTileAspect(outputSize(), ui->sbCols->value(), aspect));
 }
 
 void MainWindow::on_btnLoad_clicked()
@@ -423,19 +467,100 @@ void MainWindow::onGridPropsValueChanged()
     ui->btnLoad->setRange(0, gridSize.width() * gridSize.height());
 }
 
-void MainWindow::onOutputResolutionChanged()
+QSize MainWindow::outputSize() const
 {
-    QSize res = QSize(ui->sbWidth->value(), ui->sbHeight->value());
+    return QSize(ui->sbWidth->value(), ui->sbHeight->value());
+}
 
-    if (res.width() <= 0 || res.height() <= 0 || m_baseImage.isNull())
-        return;
+double MainWindow::printUnitsPerInch() const
+{
+    return ui->cbPrintUnit->currentIndex() == 1 ? 1.0 : 2.54;
+}
 
-    m_baseImage = m_baseImage.scaled(res);
-    m_processedGridSize = QSize();
-    m_imageView.setImage(m_baseImage);
+void MainWindow::outputSizeChanged()
+{
+    // The cells' shape depends on the output's, so fixed tile shapes need other rows.
     applyTileShape();
-    onGridPropsValueChanged();
-    ui->btnSave->setEnabled(false);
+    updatePrintSize();
+}
+
+void MainWindow::updatePrintSize()
+{
+    QString suffix = ui->cbPrintUnit->currentIndex() == 1 ? tr(" in") : tr(" cm");
+    double unitsPerPixel = printUnitsPerInch() / ui->sbDpi->value();
+
+    for (QDoubleSpinBox *box : {ui->sbPrintWidth, ui->sbPrintHeight})
+    {
+        box->blockSignals(true);
+        box->setSuffix(suffix);
+        box->setDecimals(ui->cbPrintUnit->currentIndex() == 1 ? 2 : 1);
+    }
+
+    ui->sbPrintWidth->setValue(ui->sbWidth->value() * unitsPerPixel);
+    ui->sbPrintHeight->setValue(ui->sbHeight->value() * unitsPerPixel);
+
+    for (QDoubleSpinBox *box : {ui->sbPrintWidth, ui->sbPrintHeight})
+        box->blockSignals(false);
+
+    updateOutputInfo();
+}
+
+void MainWindow::setPixelsFromPrintSize(bool fromWidth)
+{
+    double pixelsPerUnit = ui->sbDpi->value() / printUnitsPerInch();
+
+    // Read both first: setting the pixels updates the print fields.
+    int width = qRound(ui->sbPrintWidth->value() * pixelsPerUnit);
+    int height = qRound(ui->sbPrintHeight->value() * pixelsPerUnit);
+
+    // Setting one side lets the locked aspect ratio adjust the other; then all
+    // fields are updated from the pixels, so they never disagree after rounding.
+    if (fromWidth)
+        ui->sbWidth->setValue(width);
+    else
+        ui->sbHeight->setValue(height);
+
+    if (!ui->btnLockRatio->isChecked())
+    {
+        if (fromWidth)
+            ui->sbHeight->setValue(height);
+        else
+            ui->sbWidth->setValue(width);
+    }
+
+    updatePrintSize();
+}
+
+void MainWindow::updateOutputInfo()
+{
+    QSize size = outputSize();
+    QSize grid(ui->sbCols->value(), ui->sbRows->value());
+
+    if (size.isEmpty() || grid.isEmpty())
+    {
+        ui->lblOutputInfo->clear();
+        return;
+    }
+
+    // Uncompressed in memory while it is created, 4 bytes per pixel.
+    double megabytes = double(size.width()) * size.height() * 4 / (1024.0 * 1024.0);
+    QSize cell(qCeil(size.width() / double(grid.width())), qCeil(size.height() / double(grid.height())));
+    double unitsPerPixel = printUnitsPerInch() / ui->sbDpi->value();
+    QString unit = ui->cbPrintUnit->currentIndex() == 1 ? tr("in") : tr("cm");
+    int decimals = ui->cbPrintUnit->currentIndex() == 1 ? 2 : 1;
+    bool mixed = ui->cbTileShape->currentIndex() == MixedTileShape;
+
+    QString tile = mixed ? tr("Slot") : tr("Tile");
+    ui->lblOutputInfo->setText(tr("%1: %2 x %3 px, %4 x %5 %6<br/>%7 x %8 px, %9 MB in memory")
+                                   .arg(tile)
+                                   .arg(cell.width())
+                                   .arg(cell.height())
+                                   .arg(QLocale().toString(cell.width() * unitsPerPixel, 'f', decimals))
+                                   .arg(QLocale().toString(cell.height() * unitsPerPixel, 'f', decimals))
+                                   .arg(unit)
+                                   .arg(size.width())
+                                   .arg(size.height())
+                                   .arg(qRound(megabytes)));
 }
 
 void MainWindow::onMosaicCreationFinished()
@@ -501,6 +626,7 @@ void MainWindow::on_btnGenerate_clicked()
     Matching matching = static_cast<Matching>(ui->cbMatching->currentIndex());
     bool gridChanged = gridSize != m_processedGridSize;
     QImage baseImage = m_baseImage;
+    QSize output = outputSize();
     m_processedGridSize = gridSize;
     saveSettings();
 
@@ -508,7 +634,7 @@ void MainWindow::on_btnGenerate_clicked()
         if (gridChanged)
             m_imageProcessing.processGrid(baseImage, gridSize);
 
-        m_imageProcessing.generateImage(baseImage.size(), gridSize, history, maxUses, tint, matching, everyPhoto,
+        m_imageProcessing.generateImage(output, gridSize, history, maxUses, tint, matching, everyPhoto,
                                         pattern);
     });
     connect(m_mosaicGeneration, SIGNAL(finished()), this, SLOT(onMosaicCreationFinished()));
@@ -556,6 +682,11 @@ void MainWindow::on_btnSave_clicked()
     // Save in the background: encoding a large mosaic, or waiting for a sleeping
     // disk to spin up, would otherwise freeze the whole window (and digiKam).
     QImage image = *out;
+
+    // Stored in the file (PNG pHYs, JPEG JFIF), so it prints at the chosen size.
+    int dotsPerMeter = qRound(ui->sbDpi->value() / 0.0254);
+    image.setDotsPerMeterX(dotsPerMeter);
+    image.setDotsPerMeterY(dotsPerMeter);
     QString nativeName = QDir::toNativeSeparators(filename);
 
     toggleUI(false);

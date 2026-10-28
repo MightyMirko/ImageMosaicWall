@@ -46,6 +46,156 @@ struct Candidate
 // already used nearby is the whole list searched again.
 const int CandidatesPerCell = 64;
 
+// Cells and the visible part of tiles are compared as a grid of this many colors per side.
+const int CellLayoutSize = 4;
+using LabLayout = std::array<ColorLab, CellLayoutSize * CellLayoutSize>;
+
+TileLayout computeTileLayout(const QImage &image)
+{
+    // Smooth scaling averages the pixels; 8 x 8 blocks of 8 x 8 pixels each.
+    const int blockPixels = 8;
+    QImage small = image.scaled(TileLayoutSize * blockPixels, TileLayoutSize * blockPixels,
+                                Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+                       .convertToFormat(QImage::Format_ARGB32);
+    TileLayout layout;
+
+    for (int by = 0; by < TileLayoutSize; ++by)
+    {
+        for (int bx = 0; bx < TileLayoutSize; ++bx)
+        {
+            int r = 0, g = 0, b = 0;
+
+            for (int y = 0; y < blockPixels; ++y)
+            {
+                const QRgb *line = reinterpret_cast<const QRgb *>(small.constScanLine(by * blockPixels + y));
+
+                for (int x = 0; x < blockPixels; ++x)
+                {
+                    QRgb c = line[bx * blockPixels + x];
+                    r += qRed(c);
+                    g += qGreen(c);
+                    b += qBlue(c);
+                }
+            }
+
+            int i = (by * TileLayoutSize + bx) * 3;
+            layout[i] = quint8(r / (blockPixels * blockPixels));
+            layout[i + 1] = quint8(g / (blockPixels * blockPixels));
+            layout[i + 2] = quint8(b / (blockPixels * blockPixels));
+        }
+    }
+
+    return layout;
+}
+
+// The colors of the part of a tile that is visible in a cell: tiles are cropped around
+// their center to the cell's aspect ratio. Resamples the stored 8 x 8 grid of the whole
+// tile to a 4 x 4 grid of that part, weighting each block by its overlapping area.
+LabLayout visibleTileLayout(const TileLayout &layout, float tileAspect, float cellAspect)
+{
+    double x0 = 0.0, x1 = 1.0, y0 = 0.0, y1 = 1.0;
+
+    if (tileAspect > cellAspect)
+    {
+        double visible = cellAspect / tileAspect;
+        x0 = (1.0 - visible) / 2.0;
+        x1 = x0 + visible;
+    }
+    else if (tileAspect < cellAspect)
+    {
+        double visible = tileAspect / cellAspect;
+        y0 = (1.0 - visible) / 2.0;
+        y1 = y0 + visible;
+    }
+
+    LabLayout result;
+
+    for (int v = 0; v < CellLayoutSize; ++v)
+    {
+        double ry0 = y0 + (y1 - y0) * v / CellLayoutSize;
+        double ry1 = y0 + (y1 - y0) * (v + 1) / CellLayoutSize;
+
+        for (int u = 0; u < CellLayoutSize; ++u)
+        {
+            double rx0 = x0 + (x1 - x0) * u / CellLayoutSize;
+            double rx1 = x0 + (x1 - x0) * (u + 1) / CellLayoutSize;
+            double r = 0.0, g = 0.0, b = 0.0, total = 0.0;
+
+            for (int by = 0; by < TileLayoutSize; ++by)
+            {
+                double oy = std::min(ry1, double(by + 1) / TileLayoutSize) - std::max(ry0, double(by) / TileLayoutSize);
+                if (oy <= 0.0)
+                    continue;
+
+                for (int bx = 0; bx < TileLayoutSize; ++bx)
+                {
+                    double ox = std::min(rx1, double(bx + 1) / TileLayoutSize) - std::max(rx0, double(bx) / TileLayoutSize);
+                    if (ox <= 0.0)
+                        continue;
+
+                    int i = (by * TileLayoutSize + bx) * 3;
+                    double weight = ox * oy;
+                    r += layout[i] * weight;
+                    g += layout[i + 1] * weight;
+                    b += layout[i + 2] * weight;
+                    total += weight;
+                }
+            }
+
+            QColor color(qRound(r / total), qRound(g / total), qRound(b / total));
+            result[v * CellLayoutSize + u] = toLab(color);
+        }
+    }
+
+    return result;
+}
+
+// The colors of a 4 x 4 grid over one cell of the base image (ARGB32). Parts of the cell
+// outside the image get the cell's mean color.
+LabLayout cellLayout(const QImage &image, const QRect &cell, QColor mean)
+{
+    LabLayout result;
+    ColorLab meanLab = toLab(mean);
+
+    for (int v = 0; v < CellLayoutSize; ++v)
+    {
+        int top = cell.top() + cell.height() * v / CellLayoutSize;
+        int bottom = std::min(image.height(), cell.top() + cell.height() * (v + 1) / CellLayoutSize);
+
+        for (int u = 0; u < CellLayoutSize; ++u)
+        {
+            int left = cell.left() + cell.width() * u / CellLayoutSize;
+            int right = std::min(image.width(), cell.left() + cell.width() * (u + 1) / CellLayoutSize);
+            qint64 r = 0, g = 0, b = 0, count = 0;
+
+            for (int y = top; y < bottom; ++y)
+            {
+                const QRgb *line = reinterpret_cast<const QRgb *>(image.constScanLine(y));
+
+                for (int x = left; x < right; ++x)
+                {
+                    r += qRed(line[x]);
+                    g += qGreen(line[x]);
+                    b += qBlue(line[x]);
+                    ++count;
+                }
+            }
+
+            if (count > 0)
+            {
+                QColor color(int(r / count), int(g / count), int(b / count));
+                result[v * CellLayoutSize + u] = toLab(color);
+            }
+            else
+            {
+                result[v * CellLayoutSize + u] = meanLab;
+            }
+        }
+    }
+
+    return result;
+}
+
 } // namespace
 
 ImageProcessing::ImageProcessing(QObject *parent)
@@ -65,6 +215,7 @@ ImageProcessing::~ImageProcessing()
 void ImageProcessing::processMosaicImages(const QList<QString> &imageList)
 {
     m_imageMeanMap.clear();
+    m_imageShapes.clear();
     m_newCacheEntries.clear();
     m_cacheHits = 0;
 
@@ -79,18 +230,26 @@ void ImageProcessing::processMosaicImages(const QList<QString> &imageList)
     // them in plain vectors (in the map's sorted order, so ties resolve as before).
     m_imagePaths.clear();
     m_imageLabs.clear();
+    m_imageAspects.clear();
+    m_imageLayouts.clear();
     m_imagePaths.reserve(m_imageMeanMap.size());
     m_imageLabs.reserve(m_imageMeanMap.size());
+    m_imageAspects.reserve(m_imageMeanMap.size());
+    m_imageLayouts.reserve(m_imageMeanMap.size());
 
     for (auto it = m_imageMeanMap.constBegin(); it != m_imageMeanMap.constEnd(); ++it)
     {
         QColor color = it.value();
+        auto shape = m_imageShapes.value(it.key());
         m_imagePaths.push_back(it.key());
         m_imageLabs.push_back(toLab(color));
+        m_imageAspects.push_back(shape.first);
+        m_imageLayouts.push_back(shape.second);
     }
 }
 
-bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int history, int maxUses, double tint)
+bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int history, int maxUses, double tint,
+                                    Matching matching)
 {
     if (!isReady())
         return false;
@@ -129,6 +288,41 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
         cellLabs[cell] = toLab(color);
     }
 
+    // With Matching::ColorLayout, cells and tiles are compared as 4 x 4 grids of colors,
+    // so a tile that is dark on the left goes where the base image is dark on the left.
+    // The tiles' grids are taken from the part that is visible at this cell size.
+    bool layoutMatching = matching == Matching::ColorLayout && !m_baseImage.isNull();
+    std::vector<LabLayout> cellLayouts;
+    std::vector<LabLayout> tileLayouts;
+
+    if (layoutMatching)
+    {
+        QSize baseCell(qCeil(m_baseImage.width() / double(gridWidth)), qCeil(m_baseImage.height() / double(gridSize.height())));
+        cellLayouts.resize(numCells);
+
+        QtConcurrent::blockingMap(cells, [&](int cell) {
+            QRect rect(QPoint((cell % gridWidth) * baseCell.width(), (cell / gridWidth) * baseCell.height()), baseCell);
+            cellLayouts[cell] = cellLayout(m_baseImage, rect, m_gridColorMap[cell]);
+        });
+
+        float cellAspect = float(cellSize.width()) / cellSize.height();
+        tileLayouts.resize(numImages);
+
+        for (int i = 0; i < numImages; ++i)
+            tileLayouts[i] = visibleTileLayout(m_imageLayouts[i], m_imageAspects[i], cellAspect);
+    }
+
+    auto distance = [&](int cell, int image) {
+        if (!layoutMatching)
+            return calculateDistance(cellLabs[cell], m_imageLabs[image]);
+
+        double sum = 0.0;
+        for (int k = 0; k < CellLayoutSize * CellLayoutSize; ++k)
+            sum += calculateDistance(cellLayouts[cell][k], tileLayouts[image][k]);
+
+        return sum / (CellLayoutSize * CellLayoutSize);
+    };
+
     std::vector<std::vector<Candidate>> candidates(numCells);
 
     QtConcurrent::blockingMap(cells, [&](int cell) {
@@ -142,7 +336,7 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
 
         for (int i = 0; i < numImages; ++i)
         {
-            Candidate candidate{calculateDistance(cellLabs[cell], m_imageLabs[i]), i};
+            Candidate candidate{distance(cell, i), i};
 
             if (int(best.size()) == CandidatesPerCell)
             {
@@ -185,11 +379,11 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
             if (!allowed(i))
                 continue;
 
-            double distance = calculateDistance(cellLabs[cell], m_imageLabs[i]);
+            double d = distance(cell, i);
 
-            if (distance < best)
+            if (d < best)
             {
-                best = distance;
+                best = d;
                 chosen = i;
             }
         }
@@ -326,11 +520,16 @@ void ImageProcessing::calculateImageMeanMap(const QList<QString> imageList,
 
         auto hit = cached.constFind(imageFileName);
 
-        if (hit != cached.constEnd() && hit->size == size && hit->mtime == mtime)
+        if (hit != cached.constEnd() && hit->size == size && hit->mtime == mtime &&
+            hit->layout.size() == int(sizeof(TileLayout)) && hit->aspect > 0.0f)
         {
+            TileLayout layout;
+            std::memcpy(layout.data(), hit->layout.constData(), sizeof(TileLayout));
+
             {
                 QMutexLocker lock(&m_lockMean);
                 m_imageMeanMap.insert(imageFileName, QColor(hit->color));
+                m_imageShapes.insert(imageFileName, qMakePair(hit->aspect, layout));
             }
 
             ++m_cacheHits;
@@ -339,12 +538,21 @@ void ImageProcessing::calculateImageMeanMap(const QList<QString> imageList,
         }
 
         QImage image = extractThumbnail(imageFileName, QSize(128, 128));
-        if (image.isNull())
-            image = loadOrientedImage(imageFileName, QSize(128, 128))
-                        .scaled(QSize(128, 128), Qt::IgnoreAspectRatio, Qt::FastTransformation);
+        bool fromPreview = !image.isNull();
+
+        if (!fromPreview)
+            image = loadOrientedImage(imageFileName, QSize(128, 128));
 
         if (image.isNull())
             return;
+
+        float aspect = float(image.width()) / image.height();
+        TileLayout layout = computeTileLayout(image);
+
+        // The mean color is computed as before: on the embedded preview, or on a
+        // 128 x 128 sample of the file.
+        if (!fromPreview)
+            image = image.scaled(QSize(128, 128), Qt::IgnoreAspectRatio, Qt::FastTransformation);
 
         // Reading QRgb values from scan lines is much faster than a QColor per pixel.
         // ARGB32 keeps the same 8 bit color values pixelColor() returned for any format.
@@ -377,7 +585,11 @@ void ImageProcessing::calculateImageMeanMap(const QList<QString> imageList,
             QMutexLocker lock(&m_lockMean);
             auto color = QColor(meanR, meanG, meanB);
             m_imageMeanMap.insert(imageFileName, color);
-            m_newCacheEntries.append({imageFileName, TileCache::Entry{size, mtime, color.rgb()}});
+            m_imageShapes.insert(imageFileName, qMakePair(aspect, layout));
+            m_newCacheEntries.append(
+                {imageFileName,
+                 TileCache::Entry{size, mtime, color.rgb(), aspect,
+                                  QByteArray(reinterpret_cast<const char *>(layout.data()), int(layout.size()))}});
         }
         emit imageProcessed(imageFileName);
     };
@@ -492,6 +704,7 @@ void ImageProcessing::processGrid(const QImage &baseImage, QSize gridSize)
 
     // Converted once here for all threads; calculateGridCellsMean() reads ARGB32 scan lines.
     QImage argbImage = baseImage.convertToFormat(QImage::Format_ARGB32);
+    m_baseImage = argbImage;
 
     QList<QFuture<void>> jobs;
     int numCellsPerThread = itemsPerThread;

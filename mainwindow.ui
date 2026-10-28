@@ -455,6 +455,33 @@
                  </property>
                 </widget>
                </item>
+               <item row="4" column="0">
+                <widget class="QLabel" name="lblMatching">
+                 <property name="toolTip">
+                  <string>Color layout compares a 4 x 4 grid of colors of the part of each photo that will be visible, so photos also match the shapes in the base image. Average color compares only one color per photo; it is faster for very large folders.</string>
+                 </property>
+                 <property name="text">
+                  <string>Matching</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="4" column="1">
+                <widget class="QComboBox" name="cbMatching">
+                 <property name="toolTip">
+                  <string>Color layout compares a 4 x 4 grid of colors of the part of each photo that will be visible, so photos also match the shapes in the base image. Average color compares only one color per photo; it is faster for very large folders.</string>
+                 </property>
+                 <item>
+                  <property name="text">
+                   <string>Color layout</string>
+                  </property>
+                 </item>
+                 <item>
+                  <property name="text">
+                   <string>Average color</string>
+                  </property>
+                 </item>
+                </widget>
+               </item>
               </layout>
              </item>
              <item>

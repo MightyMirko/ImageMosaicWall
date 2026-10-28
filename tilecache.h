@@ -1,6 +1,7 @@
 #ifndef TILECACHE_H
 #define TILECACHE_H
 
+#include <QByteArray>
 #include <QHash>
 #include <QList>
 #include <QPair>
@@ -23,14 +24,16 @@ public:
     {
         qint64 size;
         qint64 mtime;
-        QRgb color;
+        QRgb color;        // mean color
+        float aspect;      // width / height, after the Exif rotation
+        QByteArray layout; // mean colors of an 8 x 8 grid, RGB, row by row
     };
 
     /**
      * Bump when the stored values are computed differently, so old entries
      * are discarded instead of being mixed with new ones.
      */
-    static const int Version = 1;
+    static const int Version = 2;
 
     explicit TileCache(const QString &fileName);
     ~TileCache();

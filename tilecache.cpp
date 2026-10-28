@@ -53,7 +53,8 @@ TileCache::TileCache(const QString &fileName)
     }
 
     if (!query.exec("CREATE TABLE IF NOT EXISTS tiles ("
-                    "path TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime INTEGER NOT NULL, color INTEGER NOT NULL)"))
+                    "path TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime INTEGER NOT NULL, color INTEGER NOT NULL, "
+                    "aspect REAL NOT NULL, layout BLOB NOT NULL)"))
     {
         qWarning() << "Tile cache disabled:" << query.lastError().text();
         m_db.close();
@@ -85,7 +86,7 @@ QHash<QString, TileCache::Entry> TileCache::load()
     QSqlQuery query(m_db);
     query.setForwardOnly(true);
 
-    if (!query.exec("SELECT path, size, mtime, color FROM tiles"))
+    if (!query.exec("SELECT path, size, mtime, color, aspect, layout FROM tiles"))
         return entries;
 
     while (query.next())
@@ -94,6 +95,8 @@ QHash<QString, TileCache::Entry> TileCache::load()
         entry.size = query.value(1).toLongLong();
         entry.mtime = query.value(2).toLongLong();
         entry.color = static_cast<QRgb>(query.value(3).toLongLong());
+        entry.aspect = query.value(4).toFloat();
+        entry.layout = query.value(5).toByteArray();
         entries.insert(query.value(0).toString(), entry);
     }
 
@@ -109,7 +112,7 @@ void TileCache::store(const QList<QPair<QString, Entry>> &entries)
     m_db.transaction();
 
     QSqlQuery query(m_db);
-    query.prepare("INSERT OR REPLACE INTO tiles (path, size, mtime, color) VALUES (?, ?, ?, ?)");
+    query.prepare("INSERT OR REPLACE INTO tiles (path, size, mtime, color, aspect, layout) VALUES (?, ?, ?, ?, ?, ?)");
 
     for (const auto &entry : entries)
     {
@@ -117,6 +120,8 @@ void TileCache::store(const QList<QPair<QString, Entry>> &entries)
         query.addBindValue(entry.second.size);
         query.addBindValue(entry.second.mtime);
         query.addBindValue(static_cast<qint64>(entry.second.color));
+        query.addBindValue(entry.second.aspect);
+        query.addBindValue(entry.second.layout);
 
         if (!query.exec())
         {

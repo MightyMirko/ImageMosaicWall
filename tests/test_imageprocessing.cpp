@@ -469,6 +469,97 @@ private slots:
         QVERIFY(similar(centre(1.0), QColor(200, 0, 0), 0));
     }
 
+    // Two tiles with the same mean color but a different layout (issue #5): only the
+    // color layout can tell which one fits a cell that is dark on the left.
+    void layoutMatchingSeesStructure()
+    {
+        QImage leftRight = solidImage(QSize(16, 16), Qt::white);
+        QImage topBottom = solidImage(QSize(16, 16), Qt::white);
+        for (int y = 0; y < 16; ++y)
+            for (int x = 0; x < 8; ++x)
+            {
+                leftRight.setPixelColor(x, y, Qt::black);
+                topBottom.setPixelColor(y, x, Qt::black);
+            }
+
+        // Sorted first, so it wins the tie in mean color matching.
+        QString a = saveImage("layout-a-topbottom.png", topBottom);
+        QString b = saveImage("layout-b-leftright.png", leftRight);
+
+        QImage base = leftRight.scaled(40, 40);
+
+        auto topRight = [&](Matching matching) {
+            ImageProcessing processing;
+            processing.processMosaicImages({a, b});
+            processing.processGrid(base, QSize(1, 1));
+            processing.generateImage(base.size(), QSize(1, 1), 0, 0, 0.0, matching);
+            return processing.getOutputImage()->pixelColor(35, 5);
+        };
+
+        QVERIFY(similar(topRight(Matching::MeanColor), Qt::black, 0));   // the top-bottom tile
+        QVERIFY(similar(topRight(Matching::ColorLayout), Qt::white, 0)); // the left-right tile
+    }
+
+    // Tiles are compared by the part that will be visible: the center of a wide tile.
+    void layoutMatchingUsesVisiblePart()
+    {
+        QImage thirds(30, 10, QImage::Format_RGB32);
+        for (int y = 0; y < 10; ++y)
+            for (int x = 0; x < 30; ++x)
+                thirds.setPixelColor(x, y, x < 10 ? Qt::red : (x < 20 ? Qt::green : Qt::blue));
+
+        QString wide = saveImage("visible-thirds.png", thirds);
+        QString plain = saveImage("visible-darkgreen.png", solidImage(QSize(10, 10), QColor(0, 128, 0)));
+
+        QImage base = solidImage(QSize(10, 10), Qt::green);
+
+        auto centre = [&](Matching matching) {
+            ImageProcessing processing;
+            processing.processMosaicImages({wide, plain});
+            processing.processGrid(base, QSize(1, 1));
+            processing.generateImage(base.size(), QSize(1, 1), 0, 0, 0.0, matching);
+            return processing.getOutputImage()->pixelColor(5, 5);
+        };
+
+        QVERIFY(similar(centre(Matching::MeanColor), QColor(0, 128, 0), 0)); // the mean of the whole wide tile is grey
+        QVERIFY(similar(centre(Matching::ColorLayout), Qt::green, 0));      // its visible center is green
+    }
+
+    // Layouts loaded from the cache give the same mosaic as freshly analysed ones.
+    void layoutsSurviveTheCache()
+    {
+        QString cacheFile = m_dir.filePath("layout-cache/tiles.sqlite");
+        QList<QString> files;
+        for (int i = 0; i < 6; ++i)
+        {
+            QImage tile = solidImage(QSize(12, 12), QColor::fromHsv(i * 60, 255, 255));
+            for (int x = 0; x < 6; ++x)
+                for (int y = 0; y < 12; ++y)
+                    tile.setPixelColor(x, y, QColor::fromHsv(i * 60 + 30, 255, 120));
+            files << saveImage(QString("layoutcache%1.png").arg(i), tile);
+        }
+
+        QImage base(60, 40, QImage::Format_RGB32);
+        for (int y = 0; y < 40; ++y)
+            for (int x = 0; x < 60; ++x)
+                base.setPixelColor(x, y, QColor::fromHsv(x * 6, 255, 100 + y * 3));
+
+        auto generate = [&]() {
+            ImageProcessing processing;
+            processing.setCacheFile(cacheFile);
+            processing.processMosaicImages(files);
+            processing.processGrid(base, QSize(6, 4));
+            processing.generateImage(base.size(), QSize(6, 4), 1);
+            return qMakePair(processing.cacheHits(), *processing.getOutputImage());
+        };
+
+        auto fresh = generate();
+        auto cached = generate();
+        QCOMPARE(fresh.first, 0);
+        QCOMPARE(cached.first, 6);
+        QVERIFY(fresh.second == cached.second);
+    }
+
     // Grid that doesn't divide the output evenly: cells that start past the
     // image edge are skipped instead of writing outside the buffer.
     void generateWithUnevenGrid()

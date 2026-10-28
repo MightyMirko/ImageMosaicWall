@@ -2,6 +2,7 @@
 #define IMAGEPROCESSOR_H
 
 #include <math.h>
+#include <array>
 #include <memory>
 #include <QColor>
 #include <QMap>
@@ -41,6 +42,17 @@ struct GridPoint : public QPoint
 
 Q_DECLARE_METATYPE(GridPoint)
 
+// How a tile is compared with a cell of the base image.
+enum class Matching
+{
+    ColorLayout, // a 4 x 4 grid of colors of the part of the tile that will be visible
+    MeanColor    // the mean color of the whole tile only (faster, the original behaviour)
+};
+
+// Mean colors of an 8 x 8 grid over a tile image, RGB, row by row.
+static const int TileLayoutSize = 8;
+using TileLayout = std::array<quint8, TileLayoutSize * TileLayoutSize * 3>;
+
 class ImageProcessing : public QObject
 {
 
@@ -56,7 +68,8 @@ public:
     void processMosaicImages(const QList<QString> &);
     // history: variation radius in cells; maxUses: how often one image may be used, 0 = no limit;
     // tint: 0..1, how much of the cell's target color is blended into its tile.
-    bool generateImage(QSize outputSize, QSize gridSize, int history, int maxUses = 0, double tint = 0.0);
+    bool generateImage(QSize outputSize, QSize gridSize, int history, int maxUses = 0, double tint = 0.0,
+                       Matching matching = Matching::ColorLayout);
     bool isReady();
 
     // Where analysed tile images are cached; empty means TileCache::defaultFileName().
@@ -86,6 +99,10 @@ private:
     QMap<QString, QColor> m_imageMeanMap;
     std::vector<QString> m_imagePaths;
     std::vector<ColorLab> m_imageLabs;
+    std::vector<float> m_imageAspects;
+    std::vector<TileLayout> m_imageLayouts;
+    QHash<QString, QPair<float, TileLayout>> m_imageShapes; // aspect and layout per path
+    QImage m_baseImage;                                     // as passed to processGrid(), ARGB32
     QMutex m_lockMean;
     QSize m_outputSize;
     std::shared_ptr<QImage> m_outputImage;

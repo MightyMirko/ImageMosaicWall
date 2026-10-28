@@ -159,6 +159,7 @@ void MainWindow::toggleUI(bool enabled)
     ui->sbWidth->setEnabled(enabled);
     ui->slHistory->setEnabled(enabled);
     ui->sbMaxUses->setEnabled(enabled);
+    ui->sbTint->setEnabled(enabled);
 }
 
 void MainWindow::loadImage(QString &filename)
@@ -381,6 +382,7 @@ void MainWindow::on_btnGenerate_clicked()
     QSize gridSize = QSize(ui->sbCols->value(), ui->sbRows->value());
     int history = m_variations[ui->slHistory->value()];
     int maxUses = ui->sbMaxUses->value();
+    double tint = ui->sbTint->value() / 100.0;
     bool gridChanged = gridSize != m_processedGridSize;
     QImage baseImage = m_baseImage;
     m_processedGridSize = gridSize;
@@ -389,7 +391,7 @@ void MainWindow::on_btnGenerate_clicked()
         if (gridChanged)
             m_imageProcessing.processGrid(baseImage, gridSize);
 
-        m_imageProcessing.generateImage(baseImage.size(), gridSize, history, maxUses);
+        m_imageProcessing.generateImage(baseImage.size(), gridSize, history, maxUses, tint);
     });
     connect(m_mosaicGeneration, SIGNAL(finished()), this, SLOT(onMosaicCreationFinished()));
     m_mosaicGeneration->start();

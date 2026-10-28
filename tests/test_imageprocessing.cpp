@@ -450,6 +450,25 @@ private slots:
         QCOMPARE(total, 16);
     }
 
+    // Tint blends the cell's target color into the tile (issue #13).
+    void generateTint()
+    {
+        QString blue = saveImage("tint-blue.png", solidImage(QSize(8, 8), QColor(0, 0, 200)));
+        QImage base = solidImage(QSize(20, 20), QColor(200, 0, 0));
+
+        auto centre = [&](double tint) {
+            ImageProcessing processing;
+            processing.processMosaicImages({blue});
+            processing.processGrid(base, QSize(2, 2));
+            processing.generateImage(base.size(), QSize(2, 2), 0, 0, tint);
+            return processing.getOutputImage()->pixelColor(5, 5);
+        };
+
+        QVERIFY(similar(centre(0.0), QColor(0, 0, 200), 0));
+        QVERIFY(similar(centre(0.5), QColor(100, 0, 100), 1));
+        QVERIFY(similar(centre(1.0), QColor(200, 0, 0), 0));
+    }
+
     // Grid that doesn't divide the output evenly: cells that start past the
     // image edge are skipped instead of writing outside the buffer.
     void generateWithUnevenGrid()

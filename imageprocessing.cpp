@@ -90,7 +90,7 @@ void ImageProcessing::processMosaicImages(const QList<QString> &imageList)
     }
 }
 
-bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int history, int maxUses)
+bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int history, int maxUses, double tint)
 {
     if (!isReady())
         return false;
@@ -250,7 +250,7 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
 
     QtConcurrent::blockingMap(cells, [&](int cell) {
         if (!m_skipBackgroundProcess)
-            renderCell(cell, m_imagePaths[assigned[cell]], cellSize, gridWidth);
+            renderCell(cell, m_imagePaths[assigned[cell]], cellSize, gridWidth, tint);
     });
 
     return !m_skipBackgroundProcess;
@@ -385,7 +385,7 @@ void ImageProcessing::calculateImageMeanMap(const QList<QString> imageList,
     QtConcurrent::map(imageList, scale).waitForFinished();
 }
 
-void ImageProcessing::renderCell(int cell, const QString &imagePath, QSize cellSize, int gridWidth)
+void ImageProcessing::renderCell(int cell, const QString &imagePath, QSize cellSize, int gridWidth, double tint)
 {
     GridPoint p(cell % gridWidth, cell / gridWidth);
 
@@ -397,6 +397,31 @@ void ImageProcessing::renderCell(int cell, const QString &imagePath, QSize cellS
     QImage scaled = image.scaled(cellSize, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
     QPoint cropOrigin((scaled.width() - cellSize.width()) / 2, (scaled.height() - cellSize.height()) / 2);
     QImage cellImage = scaled.copy(QRect(cropOrigin, cellSize)).convertToFormat(QImage::Format_ARGB32);
+
+    // Blend the cell's color in the base image into the tile, as the mosaic reads better
+    // from a distance: pixel = (1 - tint) * pixel + tint * target.
+    if (tint > 0.0)
+    {
+        int strength = qBound(0, qRound(tint * 256), 256);
+        QRgb target = m_gridColorMap[cell].rgb();
+        int tr = qRed(target) * strength;
+        int tg = qGreen(target) * strength;
+        int tb = qBlue(target) * strength;
+
+        for (int y = 0; y < cellImage.height(); ++y)
+        {
+            QRgb *line = reinterpret_cast<QRgb *>(cellImage.scanLine(y));
+
+            for (int x = 0; x < cellImage.width(); ++x)
+            {
+                QRgb c = line[x];
+                line[x] = qRgba((qRed(c) * (256 - strength) + tr) >> 8,
+                                (qGreen(c) * (256 - strength) + tg) >> 8,
+                                (qBlue(c) * (256 - strength) + tb) >> 8,
+                                qAlpha(c));
+            }
+        }
+    }
 
     emit mosaicGenerated(p);
 

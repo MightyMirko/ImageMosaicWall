@@ -420,6 +420,41 @@
                  </property>
                 </widget>
                </item>
+               <item row="3" column="0">
+                <widget class="QLabel" name="lblTint">
+                 <property name="toolTip">
+                  <string>Blends the color of the base image into each tile, so the mosaic reads better from a distance. 10 to 30 % is usually enough.</string>
+                 </property>
+                 <property name="text">
+                  <string>Tint</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="3" column="1">
+                <widget class="QSpinBox" name="sbTint">
+                 <property name="toolTip">
+                  <string>Blends the color of the base image into each tile, so the mosaic reads better from a distance. 10 to 30 % is usually enough.</string>
+                 </property>
+                 <property name="specialValueText">
+                  <string>off</string>
+                 </property>
+                 <property name="suffix">
+                  <string> %</string>
+                 </property>
+                 <property name="minimum">
+                  <number>0</number>
+                 </property>
+                 <property name="maximum">
+                  <number>100</number>
+                 </property>
+                 <property name="singleStep">
+                  <number>5</number>
+                 </property>
+                 <property name="value">
+                  <number>0</number>
+                 </property>
+                </widget>
+               </item>
               </layout>
              </item>
              <item>

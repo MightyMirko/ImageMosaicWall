@@ -54,8 +54,9 @@ public:
     void processCanceled(bool canceled);
     void processGrid(const QImage &, QSize);
     void processMosaicImages(const QList<QString> &);
-    // history: variation radius in cells; maxUses: how often one image may be used, 0 = no limit.
-    bool generateImage(QSize outputSize, QSize gridSize, int history, int maxUses = 0);
+    // history: variation radius in cells; maxUses: how often one image may be used, 0 = no limit;
+    // tint: 0..1, how much of the cell's target color is blended into its tile.
+    bool generateImage(QSize outputSize, QSize gridSize, int history, int maxUses = 0, double tint = 0.0);
     bool isReady();
 
     // Where analysed tile images are cached; empty means TileCache::defaultFileName().
@@ -71,7 +72,7 @@ signals:
 private:
     void calculateGridCellsMean(const QImage &, const QSize &, std::vector<QColor> &, int, int);
     void calculateImageMeanMap(const QList<QString>, const QHash<QString, TileCache::Entry> &cached);
-    void renderCell(int cell, const QString &imagePath, QSize cellSize, int gridWidth);
+    void renderCell(int cell, const QString &imagePath, QSize cellSize, int gridWidth, double tint);
     double calculateDistance(QColor rhs, QColor lhs) const;
     double calculateDistance(ColorLab rhs, ColorLab lhs) const;
 

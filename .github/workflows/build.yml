@@ -94,8 +94,8 @@ jobs:
         run: ctest --test-dir build -C RelWithDebInfo --output-on-failure --no-tests=error
 
   macos:
-    name: macOS (Homebrew, Qt 6)
-    runs-on: macos-latest
+    name: macOS 26 (Homebrew, Qt 6)
+    runs-on: macos-26
     steps:
       - name: Install dependencies
         run: brew install qt exiv2

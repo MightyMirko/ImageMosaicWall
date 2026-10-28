@@ -79,9 +79,15 @@ The tests run without a display.
 
 The analysis of the tile images is cached in a small SQLite database, so setting the same folder again only reads new or changed files. Inside digiKam it is stored in `~/.cache/digikam/imagemosaicwall/tiles.sqlite` on Linux (the standalone app uses its own cache folder). It is safe to delete; it is rebuilt on the next run.
 
+# Printing and large mosaics
+
+The output size can be set in pixels or as print size in cm or inches at a resolution in dpi; the resolution is stored in the saved file. The mosaic can be much larger than its base image.
+
+Mosaics up to about 16000 x 16000 pixels (1 GB) are kept in memory and can be saved as PNG, JPEG or TIFF. Larger ones are drawn piece by piece when saving: as TIFF in strips (BigTIFF above 4 GB), or split into **poster parts** (columns x rows, with an optional overlap for gluing), each saved as its own file `name_r1c2.png` and so on.
+
 # Settings
 
-The options (RAW files, variation, max. uses, every photo, tint, matching, grid, tile shape, print unit and resolution) and the last used folders are remembered between sessions, in `~/.config/ImageMosaicWall/ImageMosaicWall.ini` on Linux and the matching user configuration folder on Windows and macOS. Delete the file to go back to the defaults.
+The options (RAW files, variation, max. uses, every photo, tint, matching, grid, tile shape, print unit, resolution and poster parts) and the last used folders are remembered between sessions, in `~/.config/ImageMosaicWall/ImageMosaicWall.ini` on Linux and the matching user configuration folder on Windows and macOS. Delete the file to go back to the defaults.
 
 # Roadmap
 

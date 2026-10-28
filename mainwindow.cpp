@@ -82,6 +82,9 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->sbRows, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::updateOutputInfo);
     connect(ui->sbCols, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::updateOutputInfo);
     connect(ui->cbTileShape, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::updateOutputInfo);
+    connect(ui->sbPartColumns, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::updateOutputInfo);
+    connect(ui->sbPartRows, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::updateOutputInfo);
+    connect(ui->sbPartOverlap, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &MainWindow::updateOutputInfo);
 
     // The combo box entries are in the order of the RawFiles values.
     connect(ui->cbRawFiles, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
@@ -201,6 +204,9 @@ void MainWindow::loadSettings()
     ui->sbDpi->setValue(settings.value("Dpi", ui->sbDpi->value()).toInt());
     ui->sbDpi->blockSignals(false);
     m_dpi = ui->sbDpi->value();
+    ui->sbPartColumns->setValue(settings.value("PartColumns", ui->sbPartColumns->value()).toInt());
+    ui->sbPartRows->setValue(settings.value("PartRows", ui->sbPartRows->value()).toInt());
+    ui->sbPartOverlap->setValue(settings.value("PartOverlap", ui->sbPartOverlap->value()).toDouble());
     updatePrintSize();
 
     m_lastImageFolder = settings.value("LastImageFolder").toString();
@@ -223,6 +229,9 @@ void MainWindow::saveSettings() const
     settings.setValue("TileShape", ui->cbTileShape->currentIndex());
     settings.setValue("PrintUnit", ui->cbPrintUnit->currentIndex());
     settings.setValue("Dpi", ui->sbDpi->value());
+    settings.setValue("PartColumns", ui->sbPartColumns->value());
+    settings.setValue("PartRows", ui->sbPartRows->value());
+    settings.setValue("PartOverlap", ui->sbPartOverlap->value());
 
     settings.setValue("LastImageFolder", m_lastImageFolder);
     settings.setValue("LastTileFolder", m_lastTileFolder);
@@ -267,9 +276,8 @@ void MainWindow::updateStatus()
 
 void MainWindow::toggleUI(bool enabled)
 {
-    auto out = m_imageProcessing.getOutputImage();
     ui->btnGenerate->setEnabled(enabled && m_imageProcessing.isReady());
-    ui->btnSave->setEnabled(enabled && out != nullptr);
+    ui->btnSave->setEnabled(enabled && m_imageProcessing.hasMosaic());
 
     ui->btnLoad->setEnabled(enabled);
     ui->btnSetImageFolder->setEnabled(enabled);
@@ -285,6 +293,9 @@ void MainWindow::toggleUI(bool enabled)
     ui->sbPrintHeight->setEnabled(enabled);
     ui->cbPrintUnit->setEnabled(enabled);
     ui->sbDpi->setEnabled(enabled);
+    ui->sbPartColumns->setEnabled(enabled);
+    ui->sbPartRows->setEnabled(enabled);
+    ui->sbPartOverlap->setEnabled(enabled);
     ui->slHistory->setEnabled(enabled);
     ui->sbMaxUses->setEnabled(enabled);
     ui->cbEveryPhoto->setEnabled(enabled);
@@ -502,6 +513,8 @@ void MainWindow::updatePrintSize()
     for (QDoubleSpinBox *box : {ui->sbPrintWidth, ui->sbPrintHeight})
         box->blockSignals(false);
 
+    ui->sbPartOverlap->setSuffix(suffix);
+
     updateOutputInfo();
 }
 
@@ -551,16 +564,35 @@ void MainWindow::updateOutputInfo()
     bool mixed = ui->cbTileShape->currentIndex() == MixedTileShape;
 
     QString tile = mixed ? tr("Slot") : tr("Tile");
-    ui->lblOutputInfo->setText(tr("%1: %2 x %3 px, %4 x %5 %6<br/>%7 x %8 px, %9 MB in memory")
-                                   .arg(tile)
-                                   .arg(cell.width())
-                                   .arg(cell.height())
-                                   .arg(QLocale().toString(cell.width() * unitsPerPixel, 'f', decimals))
-                                   .arg(QLocale().toString(cell.height() * unitsPerPixel, 'f', decimals))
-                                   .arg(unit)
-                                   .arg(size.width())
-                                   .arg(size.height())
-                                   .arg(qRound(megabytes)));
+    QString text = tr("%1: %2 x %3 px, %4 x %5 %6<br/>%7 x %8 px, %9 MB")
+                       .arg(tile)
+                       .arg(cell.width())
+                       .arg(cell.height())
+                       .arg(QLocale().toString(cell.width() * unitsPerPixel, 'f', decimals))
+                       .arg(QLocale().toString(cell.height() * unitsPerPixel, 'f', decimals))
+                       .arg(unit)
+                       .arg(size.width())
+                       .arg(size.height())
+                       .arg(qRound(megabytes));
+
+    QList<QRect> parts = posterParts(size);
+    if (parts.size() > 1)
+    {
+        // Middle parts overlap on both sides, so they are the largest.
+        QSize part;
+        for (const QRect &region : parts)
+            part = part.expandedTo(region.size());
+        text += tr("<br/>%1 parts of up to %2 x %3 %4")
+                    .arg(parts.size())
+                    .arg(QLocale().toString(part.width() * unitsPerPixel, 'f', decimals))
+                    .arg(QLocale().toString(part.height() * unitsPerPixel, 'f', decimals))
+                    .arg(unit);
+    }
+
+    if (megabytes * 1024 * 1024 > m_imageProcessing.maxImageBytes())
+        text += tr("<br/>Too large to keep in memory: saved as TIFF in strips, or in parts.");
+
+    ui->lblOutputInfo->setText(text);
 }
 
 void MainWindow::onMosaicCreationFinished()
@@ -570,6 +602,8 @@ void MainWindow::onMosaicCreationFinished()
     auto out = m_imageProcessing.getOutputImage();
     if (out != nullptr)
         m_imageView.setPreview(*out);
+    else if (!m_largePreview.isNull())
+        m_imageView.setPreview(m_largePreview);
 
     toggleUI(true);
     ui->btnCancel->hide();
@@ -630,35 +664,59 @@ void MainWindow::on_btnGenerate_clicked()
     m_processedGridSize = gridSize;
     saveSettings();
 
+    m_imageProcessing.setDotsPerInch(ui->sbDpi->value());
+    m_largePreview = QImage();
+
     m_mosaicGeneration = QThread::create([=] {
         if (gridChanged)
             m_imageProcessing.processGrid(baseImage, gridSize);
 
         m_imageProcessing.generateImage(output, gridSize, history, maxUses, tint, matching, everyPhoto,
                                         pattern);
+
+        // Too large to keep in memory: only a smaller copy is drawn to show it.
+        if (!m_imageProcessing.getOutputImage() && m_imageProcessing.hasMosaic())
+            m_largePreview = m_imageProcessing.renderPreview(QSize(8192, 8192));
     });
     connect(m_mosaicGeneration, SIGNAL(finished()), this, SLOT(onMosaicCreationFinished()));
     m_mosaicGeneration->start();
 }
 
+QList<QRect> MainWindow::posterParts(QSize size) const
+{
+    int overlap = qRound(ui->sbPartOverlap->value() / printUnitsPerInch() * ui->sbDpi->value());
+    return posterRegions(size, ui->sbPartColumns->value(), ui->sbPartRows->value(), overlap);
+}
+
 void MainWindow::on_btnSave_clicked()
 {
-    const QImage *out = m_imageProcessing.getOutputImage();
-    if (out == nullptr)
+    if (!m_imageProcessing.hasMosaic())
         return;
+
+    const QImage *out = m_imageProcessing.getOutputImage();
+    QSize size = m_imageProcessing.mosaicSize();
+    QList<QRect> regions = posterParts(size);
+    bool inParts = regions.size() > 1;
 
     QString pngFilter = tr("PNG (*.png)");
     QString jpegFilter = tr("JPEG (*.jpg)");
-    QString selectedFilter = pngFilter;
+    QString tiffFilter = tr("TIFF (*.tif)");
+
+    // Larger than the memory allows for PNG and JPEG: TIFF is suggested.
+    bool tooLarge = !out;
+    QString selectedFilter = tooLarge ? tiffFilter : pngFilter;
 
     // Suggested next to the base image, or in the folder the last mosaic was saved to.
     bool hasSaveFolder = !m_lastSaveFolder.isEmpty() && QDir(m_lastSaveFolder).exists();
     QString suggestion = suggestedMosaicFileName(m_baseImagePath, hasSaveFolder ? m_lastSaveFolder : QString());
+    if (tooLarge)
+        suggestion = QFileInfo(suggestion).dir().filePath(QFileInfo(suggestion).completeBaseName() + ".tif");
 
     QString filename = QFileDialog::getSaveFileName(this,
-                                                    tr("Save Mosaic Image"),
+                                                    inParts ? tr("Save Mosaic in %1 Parts").arg(regions.size())
+                                                            : tr("Save Mosaic Image"),
                                                     suggestion,
-                                                    pngFilter + ";;" + jpegFilter,
+                                                    pngFilter + ";;" + jpegFilter + ";;" + tiffFilter,
                                                     &selectedFilter);
 
     if (filename.isEmpty())
@@ -666,53 +724,94 @@ void MainWindow::on_btnSave_clicked()
 
     // QImage::save() picks the format from the suffix and fails without one.
     if (QFileInfo(filename).suffix().isEmpty())
-        filename += (selectedFilter == jpegFilter) ? ".jpg" : ".png";
+        filename += (selectedFilter == jpegFilter) ? ".jpg" : (selectedFilter == tiffFilter) ? ".tif" : ".png";
 
-    // Overwriting the base image would replace the original photo and lose its metadata.
-    if (!m_baseImagePath.isEmpty() && QFileInfo(filename) == QFileInfo(m_baseImagePath))
+    // Parts are numbered by row and column: name_r1c2.png.
+    QList<MosaicPart> parts;
+    QFileInfo info(filename);
+    for (int i = 0; i < regions.size(); ++i)
     {
-        QMessageBox::warning(this,
-                             tr("Save Mosaic Image"),
-                             tr("The mosaic can't be saved over its base image. Please choose another file name."));
-        return;
+        QString name = !inParts ? filename
+                                : info.dir().filePath(QString("%1_r%2c%3.%4")
+                                                          .arg(info.completeBaseName())
+                                                          .arg(i / ui->sbPartColumns->value() + 1)
+                                                          .arg(i % ui->sbPartColumns->value() + 1)
+                                                          .arg(info.suffix()));
+        parts.append({regions[i], name});
     }
 
-    m_lastSaveFolder = QFileInfo(filename).absolutePath();
+    // Overwriting the base image would replace the original photo and lose its metadata.
+    for (const MosaicPart &part : parts)
+    {
+        if (!m_baseImagePath.isEmpty() && QFileInfo(part.fileName) == QFileInfo(m_baseImagePath))
+        {
+            QMessageBox::warning(this,
+                                 tr("Save Mosaic Image"),
+                                 tr("The mosaic can't be saved over its base image. Please choose another file name."));
+            return;
+        }
+    }
+
+    // The dialog only asked about the name typed, not the parts' names.
+    if (inParts)
+    {
+        int existing = 0;
+        for (const MosaicPart &part : parts)
+            existing += QFileInfo::exists(part.fileName) ? 1 : 0;
+
+        if (existing > 0 &&
+            QMessageBox::question(this,
+                                  tr("Save Mosaic Image"),
+                                  tr("%1 of the %2 parts already exist. Replace them?").arg(existing).arg(parts.size())) !=
+                QMessageBox::Yes)
+            return;
+    }
+
+    m_lastSaveFolder = info.absolutePath();
+    QString nativeName = QDir::toNativeSeparators(filename);
+    int dotsPerInch = ui->sbDpi->value();
+
+    toggleUI(false);
+    m_imageProcessing.processCanceled(false);
+    ui->lblStatus->setText(tr("Saving %1 ...").arg(nativeName));
 
     // Save in the background: encoding a large mosaic, or waiting for a sleeping
     // disk to spin up, would otherwise freeze the whole window (and digiKam).
-    QImage image = *out;
+    auto watcher = new QFutureWatcher<QString>(this);
 
-    // Stored in the file (PNG pHYs, JPEG JFIF), so it prints at the chosen size.
-    int dotsPerMeter = qRound(ui->sbDpi->value() / 0.0254);
-    image.setDotsPerMeterX(dotsPerMeter);
-    image.setDotsPerMeterY(dotsPerMeter);
-    QString nativeName = QDir::toNativeSeparators(filename);
-
-    toggleUI(false);
-    ui->lblStatus->setText(tr("Saving %1 ...").arg(nativeName));
-
-    auto watcher = new QFutureWatcher<bool>(this);
-
-    connect(watcher, &QFutureWatcher<bool>::finished, this, [=]() {
-        bool saved = watcher->result();
+    connect(watcher, &QFutureWatcher<QString>::finished, this, [=]() {
+        QString error = watcher->result();
         watcher->deleteLater();
         toggleUI(true);
 
-        if (saved)
+        if (error.isEmpty())
         {
-            ui->lblStatus->setText(tr("Saved to %1").arg(nativeName));
+            ui->lblStatus->setText(inParts ? tr("Saved %1 parts as %2").arg(parts.size()).arg(nativeName)
+                                           : tr("Saved to %1").arg(nativeName));
         }
         else
         {
             ui->lblStatus->clear();
-            QMessageBox::warning(this,
-                                 tr("Save Mosaic Image"),
-                                 tr("The mosaic could not be saved to %1.").arg(nativeName));
+            QMessageBox::warning(this, tr("Save Mosaic Image"), error);
         }
     });
 
-    watcher->setFuture(QtConcurrent::run([image, filename]() { return image.save(filename); }));
+    watcher->setFuture(QtConcurrent::run([this, out, parts, dotsPerInch]() {
+        for (int i = 0; i < parts.size(); ++i)
+        {
+            if (parts.size() > 1)
+                QMetaObject::invokeMethod(this, [this, i, n = parts.size()]() {
+                    ui->lblStatus->setText(tr("Saving part %1 of %2 ...").arg(i + 1).arg(n));
+                });
+
+            QString error;
+            if (!saveMosaicPart(m_imageProcessing, out, parts[i], dotsPerInch, error))
+                return tr("The mosaic could not be saved to %1.").arg(QDir::toNativeSeparators(parts[i].fileName)) +
+                       " " + error;
+        }
+
+        return QString();
+    }));
 }
 
 void MainWindow::on_btnSetImageFolder_clicked()

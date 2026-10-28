@@ -50,6 +50,8 @@ private:
   void updatePrintSize();
   void setPixelsFromPrintSize(bool fromWidth);
   void updateOutputInfo();
+  // The regions of the poster parts of a mosaic of size, row by row.
+  QList<QRect> posterParts(QSize size) const;
 
 signals:
   void mosaicCalculationFinished(QMap<GridPoint, QImage> &);
@@ -79,6 +81,7 @@ private:
   QMap<QString, QIcon> m_activeLoadingButtons;
   QSize m_lockedResolution;
   QSize m_processedGridSize;
+  QImage m_largePreview;   // shown for mosaics too large to be kept in memory
   int m_dpi = 300;   // the resolution the output size was last scaled for
 
   const ushort m_variations[6] = {0, 1, 3, 9, 11, 15};

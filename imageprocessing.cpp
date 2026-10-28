@@ -1,4 +1,5 @@
 #include "imageprocessing.h"
+#include "tiffwriter.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -1005,6 +1006,12 @@ bool ImageProcessing::render(QImage &target, const QRect &region, double scale, 
 {
     target.fill(Qt::transparent);
 
+    if (m_dotsPerMeter > 0)
+    {
+        target.setDotsPerMeterX(m_dotsPerMeter);
+        target.setDotsPerMeterY(m_dotsPerMeter);
+    }
+
     // Output coordinates are mapped to target pixels by scaling and rounding down, so
     // neighbouring cells meet exactly also in a scaled preview.
     auto toTarget = [&](int v) { return int(std::floor(v * scale)); };
@@ -1118,6 +1125,11 @@ QImage ImageProcessing::renderPreview(QSize maxSize)
         return QImage();
 
     return image;
+}
+
+void ImageProcessing::setDotsPerInch(int dotsPerInch)
+{
+    m_dotsPerMeter = qRound(dotsPerInch / 0.0254);
 }
 
 qint64 ImageProcessing::maxImageBytes() const
@@ -1368,6 +1380,91 @@ int rowsForTileAspect(QSize imageSize, int columns, double tileAspect)
 
     // Cells are imageWidth / columns wide and that divided by tileAspect high.
     return qMax(1, qRound(imageSize.height() * columns * tileAspect / imageSize.width()));
+}
+
+QList<QRect> posterRegions(QSize size, int columns, int rows, int overlap)
+{
+    QList<QRect> parts;
+
+    for (int r = 0; r < rows; ++r)
+    {
+        for (int c = 0; c < columns; ++c)
+        {
+            int left = int(qint64(size.width()) * c / columns);
+            int right = int(qint64(size.width()) * (c + 1) / columns);
+            int top = int(qint64(size.height()) * r / rows);
+            int bottom = int(qint64(size.height()) * (r + 1) / rows);
+
+            QRect part(QPoint(left - overlap, top - overlap), QPoint(right - 1 + overlap, bottom - 1 + overlap));
+            parts << part.intersected(QRect(QPoint(0, 0), size));
+        }
+    }
+
+    return parts;
+}
+
+bool saveMosaicPart(ImageProcessing &processing, const QImage *whole, const MosaicPart &part, int dotsPerInch,
+                    QString &error)
+{
+    QString suffix = QFileInfo(part.fileName).suffix().toLower();
+
+    if (suffix == "tif" || suffix == "tiff")
+    {
+        TiffWriter writer;
+        if (!writer.open(part.fileName, part.region.size(), dotsPerInch))
+        {
+            error = writer.errorString();
+            return false;
+        }
+
+        // Strips of about 64 MB while drawing.
+        int stripRows = qMax(1, int((qint64(64) << 20) / (qint64(part.region.width()) * 4)));
+
+        for (int y = part.region.top(); y <= part.region.bottom(); y += stripRows)
+        {
+            QRect strip(part.region.left(), y, part.region.width(), qMin(stripRows, part.region.bottom() + 1 - y));
+            QImage rows = whole ? whole->copy(strip) : processing.renderRegion(strip);
+
+            if (rows.isNull() || !writer.writeRows(rows))
+            {
+                error = rows.isNull() ? QObject::tr("The mosaic could not be drawn.") : writer.errorString();
+                return false;
+            }
+        }
+
+        if (!writer.close())
+        {
+            error = writer.errorString();
+            return false;
+        }
+
+        return true;
+    }
+
+    if (!whole && qint64(part.region.width()) * part.region.height() * 4 > processing.maxImageBytes())
+    {
+        error = QObject::tr("It is too large for PNG or JPEG. Please save it as TIFF, or in more poster parts.");
+        return false;
+    }
+
+    // The drawn images carry the print resolution already; setting it here would copy
+    // the whole mosaic.
+    QImage image = !whole ? processing.renderRegion(part.region)
+                          : part.region == whole->rect() ? *whole : whole->copy(part.region);
+
+    if (image.isNull())
+    {
+        error = QObject::tr("The mosaic could not be drawn.");
+        return false;
+    }
+
+    if (!image.save(part.fileName))
+    {
+        error = QObject::tr("The file could not be written.");
+        return false;
+    }
+
+    return true;
 }
 
 QString suggestedMosaicFileName(const QString &baseImagePath, const QString &folder)

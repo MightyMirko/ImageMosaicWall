@@ -679,6 +679,79 @@ private slots:
         QCOMPARE(qRound(read.dotsPerMeterX() * 0.0254), 150);
     }
 
+    // Issue #18: poster parts cover the mosaic and overlap only inside it.
+    void posterRegionsSplitTheMosaic()
+    {
+        QList<QRect> parts = posterRegions(QSize(100, 60), 3, 2, 5);
+        QCOMPARE(parts.size(), 6);
+        QCOMPARE(parts[0], QRect(QPoint(0, 0), QPoint(37, 34)));     // right and bottom overlap
+        QCOMPARE(parts[1], QRect(QPoint(28, 0), QPoint(70, 34)));    // both sides
+        QCOMPARE(parts[5], QRect(QPoint(61, 25), QPoint(99, 59)));   // ends at the mosaic's edge
+
+        QCOMPARE(posterRegions(QSize(100, 60), 1, 1, 5), QList<QRect>{QRect(0, 0, 100, 60)});
+    }
+
+    // Issue #18: parts are saved as they look in the mosaic, also when it isn't kept
+    // in memory; then PNG and JPEG are refused when a part is too large.
+    void saveMosaicParts()
+    {
+        if (!QImageReader::supportedImageFormats().contains("tiff"))
+            QSKIP("Qt has no TIFF reader here to read the files back");
+
+        QList<QString> files;
+        for (int i = 0; i < 6; ++i)
+            files << saveImage(QString("save%1.png").arg(i), solidImage(QSize(30, 20), QColor::fromHsv(i * 60, 200, 200)));
+
+        QImage base(120, 80, QImage::Format_RGB32);
+        for (int y = 0; y < base.height(); ++y)
+            for (int x = 0; x < base.width(); ++x)
+                base.setPixelColor(x, y, QColor::fromHsv((x * 3) % 360, 200, 200));
+
+        ImageProcessing processing;
+        processing.setDotsPerInch(150);
+        processing.processMosaicImages(files);
+        processing.processGrid(base, QSize(6, 4));
+        QVERIFY(processing.generateImage(QSize(240, 160), QSize(6, 4), 1));
+        QImage whole = *processing.getOutputImage();
+        QCOMPARE(qRound(whole.dotsPerMeterX() * 0.0254), 150);
+
+        QList<QRect> regions = posterRegions(whole.size(), 2, 2, 3);
+        QString error;
+
+        for (const QString &suffix : {QString("png"), QString("tif")})
+        {
+            for (int i = 0; i < regions.size(); ++i)
+            {
+                QString name = m_dir.filePath(QString("part%1.%2").arg(i).arg(suffix));
+                QVERIFY2(saveMosaicPart(processing, &whole, {regions[i], name}, 150, error), qPrintable(error));
+
+                QImage saved(name);
+                QCOMPARE(saved.size(), regions[i].size());
+                QVERIFY(similar(saved.convertToFormat(QImage::Format_RGB32),
+                                whole.copy(regions[i]).convertToFormat(QImage::Format_RGB32), 0));
+                QCOMPARE(qRound(saved.dotsPerMeterX() * 0.0254), 150);
+            }
+        }
+
+        // Not in memory: TIFF is drawn in strips; PNG only if the part is small enough.
+        processing.setMaxImageBytes(130 * 90 * 4);   // a part, not the whole mosaic
+        QVERIFY(processing.generateImage(QSize(240, 160), QSize(6, 4), 1));
+        QVERIFY(processing.getOutputImage() == nullptr);
+
+        QString tiff = m_dir.filePath("large.tif");
+        QVERIFY2(saveMosaicPart(processing, nullptr, {QRect(0, 0, 240, 160), tiff}, 150, error), qPrintable(error));
+        QVERIFY(similar(QImage(tiff).convertToFormat(QImage::Format_RGB32), whole.convertToFormat(QImage::Format_RGB32), 0));
+
+        QVERIFY(!saveMosaicPart(processing, nullptr, {QRect(0, 0, 240, 160), m_dir.filePath("large.png")}, 150, error));
+        QVERIFY(!error.isEmpty());
+        QVERIFY(!QFile::exists(m_dir.filePath("large.png")));
+
+        QString small = m_dir.filePath("small.png");
+        QVERIFY2(saveMosaicPart(processing, nullptr, {regions[3], small}, 150, error), qPrintable(error));
+        QVERIFY(similar(QImage(small).convertToFormat(QImage::Format_RGB32),
+                        whole.copy(regions[3]).convertToFormat(QImage::Format_RGB32), 0));
+    }
+
     // Issue #20: in the parquet pattern a slot holds one portrait photo or two landscape
     // photos stacked, and the share of portrait slots follows the share of portraits.
     void parquetPlacesPhotosByOrientation()

@@ -4,6 +4,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QPainter>
 #include <QSet>
 #include <QStandardPaths>
 #include <QImage>
@@ -559,6 +560,71 @@ private slots:
         QVERIFY(similar(out->pixelColor(50, 150), QColor(200, 30, 30), 2));
         QVERIFY(similar(out->pixelColor(350, 150), QColor(30, 30, 200), 2));
         QCOMPARE(qAlpha(out->pixel(399, 299)), 255);
+    }
+
+    // Issue #18: any part of the mosaic can be drawn on its own, exactly as in the
+    // whole mosaic, so large ones can be saved piece by piece.
+    void renderRegionsMatchWholeMosaic()
+    {
+        QList<QString> files;
+        for (int i = 0; i < 8; ++i)
+            files << saveImage(QString("region%1.png").arg(i), solidImage(QSize(30, 20), QColor::fromHsv(i * 45, 200, 200)));
+
+        QImage base(150, 100, QImage::Format_RGB32);
+        for (int y = 0; y < base.height(); ++y)
+            for (int x = 0; x < base.width(); ++x)
+                base.setPixelColor(x, y, QColor::fromHsv((x * 2 + y) % 360, 200, 200));
+
+        for (Pattern pattern : {Pattern::Grid, Pattern::Parquet})
+        {
+            ImageProcessing processing;
+            processing.processMosaicImages(files);
+            processing.processGrid(base, QSize(7, 5));
+            QVERIFY(processing.generateImage(QSize(301, 203), QSize(7, 5), 1, 0, 0.25, Matching::ColorLayout, false,
+                                             pattern));
+            QImage whole = *processing.getOutputImage();
+
+            // Strips, and a region that starts and ends inside cells.
+            QImage stitched(whole.size(), QImage::Format_ARGB32);
+            QPainter painter(&stitched);
+            for (int y = 0; y < whole.height(); y += 37)
+            {
+                QRect strip(0, y, whole.width(), qMin(37, whole.height() - y));
+                painter.drawImage(strip.topLeft(), processing.renderRegion(strip));
+            }
+            painter.end();
+            QVERIFY(stitched == whole);
+
+            QRect inside(23, 17, 101, 88);
+            QVERIFY(processing.renderRegion(inside) == whole.copy(inside));
+
+            // A preview has the mosaic's aspect ratio and fits the size asked for.
+            QImage preview = processing.renderPreview(QSize(100, 100));
+            QCOMPARE(preview.size(), QSize(100, 67));
+            QCOMPARE(qAlpha(preview.pixel(99, 66)), 255);
+        }
+    }
+
+    // A mosaic larger than the memory limit is placed, but not drawn as a whole.
+    void largeMosaicIsNotKeptInMemory()
+    {
+        QList<QString> files{saveImage("limit-a.png", solidImage(QSize(30, 20), Qt::red)),
+                             saveImage("limit-b.png", solidImage(QSize(30, 20), Qt::blue))};
+        QImage base = solidImage(QSize(60, 40), Qt::red);
+
+        ImageProcessing processing;
+        processing.setMaxImageBytes(1000 * 1000 * 4 - 1);
+        processing.processMosaicImages(files);
+        processing.processGrid(base, QSize(6, 4));
+
+        QVERIFY(processing.generateImage(QSize(999, 999), QSize(6, 4), 0));
+        QVERIFY(processing.getOutputImage() != nullptr);
+
+        QVERIFY(processing.generateImage(QSize(1500, 1000), QSize(6, 4), 0));
+        QVERIFY(processing.getOutputImage() == nullptr);
+        QVERIFY(processing.hasMosaic());
+        QCOMPARE(processing.mosaicSize(), QSize(1500, 1000));
+        QVERIFY(similar(processing.renderRegion(QRect(1400, 900, 50, 50)).pixelColor(10, 10), Qt::red, 0));
     }
 
     // Issue #20: in the parquet pattern a slot holds one portrait photo or two landscape

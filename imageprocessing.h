@@ -49,6 +49,17 @@ enum class Matching
     MeanColor    // the mean color of the whole tile only (faster, the original behaviour)
 };
 
+// How the mosaic is divided into cells.
+enum class Pattern
+{
+    Grid,    // rows and columns of equal cells
+    Parquet  // upright slots of 1 : sqrt(2), each with one portrait photo or two landscape
+             // photos stacked; photos only go into cells of their own orientation
+};
+
+// Width / height of a parquet slot; two cells of sqrt(2) : 1 stacked fill it exactly.
+const double ParquetSlotAspect = 0.70710678118654752;
+
 // Mean colors of an 8 x 8 grid over a tile image, RGB, row by row.
 static const int TileLayoutSize = 8;
 using TileLayout = std::array<quint8, TileLayoutSize * TileLayoutSize * 3>;
@@ -68,9 +79,11 @@ public:
     void processMosaicImages(const QList<QString> &);
     // history: variation radius in cells; maxUses: how often one image may be used, 0 = no limit;
     // tint: 0..1, how much of the cell's target color is blended into its tile;
-    // useEveryImage: every image gets at least one cell, if there are enough cells.
+    // useEveryImage: every image gets at least one cell, if there are enough cells;
+    // pattern: with Pattern::Parquet, gridSize counts slots instead of cells.
     bool generateImage(QSize outputSize, QSize gridSize, int history, int maxUses = 0, double tint = 0.0,
-                       Matching matching = Matching::ColorLayout, bool useEveryImage = false);
+                       Matching matching = Matching::ColorLayout, bool useEveryImage = false,
+                       Pattern pattern = Pattern::Grid);
     bool isReady();
 
     // Where analysed tile images are cached; empty means TileCache::defaultFileName().
@@ -87,7 +100,7 @@ private:
     void calculateGridCellsMean(const QImage &, const QSize &, std::vector<QColor> &, int, int);
     void calculateImageMeanMap(const QList<QString>, const QHash<QString, TileCache::Entry> &cached);
     QImage loadTile(const QString &imagePath, QSize cellSize) const;
-    void drawCell(int cell, QImage tile, QSize cellSize, int gridWidth, double tint);
+    void drawCell(const QRect &cell, QImage tile, QColor target, double tint, GridPoint slot);
     double calculateDistance(QColor rhs, QColor lhs) const;
     double calculateDistance(ColorLab rhs, ColorLab lhs) const;
 

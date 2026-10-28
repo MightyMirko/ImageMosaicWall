@@ -817,7 +817,7 @@
                  <item row="2" column="0">
                   <widget class="QLabel" name="lblTileShape">
                    <property name="toolTip">
-                    <string>The shape of the tiles. With a fixed shape the rows follow from the columns and the image size, so photos taken in that shape are not cropped. Free: the shape follows from rows and columns.</string>
+                    <string>The shape of the tiles. With a fixed shape the rows follow from the columns and the image size, so photos taken in that shape are not cropped. Free: the shape follows from rows and columns. Mixed: like parquet, each upright slot holds one portrait photo or two landscape photos stacked, so photos of both orientations are hardly cropped; the columns count slots.</string>
                    </property>
                    <property name="text">
                     <string>Tile shape</string>
@@ -827,7 +827,7 @@
                  <item row="2" column="1">
                   <widget class="QComboBox" name="cbTileShape">
                    <property name="toolTip">
-                    <string>The shape of the tiles. With a fixed shape the rows follow from the columns and the image size, so photos taken in that shape are not cropped. Free: the shape follows from rows and columns.</string>
+                    <string>The shape of the tiles. With a fixed shape the rows follow from the columns and the image size, so photos taken in that shape are not cropped. Free: the shape follows from rows and columns. Mixed: like parquet, each upright slot holds one portrait photo or two landscape photos stacked, so photos of both orientations are hardly cropped; the columns count slots.</string>
                    </property>
                    <item>
                     <property name="text">
@@ -862,6 +862,11 @@
                    <item>
                     <property name="text">
                      <string>1:1 square</string>
+                    </property>
+                   </item>
+                   <item>
+                    <property name="text">
+                     <string>Mixed portrait/landscape</string>
                     </property>
                    </item>
                   </widget>

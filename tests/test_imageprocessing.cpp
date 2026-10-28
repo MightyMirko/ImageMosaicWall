@@ -538,6 +538,147 @@ private slots:
         QCOMPARE(seen.size(), 9);
     }
 
+    // Issue #20: in the parquet pattern a slot holds one portrait photo or two landscape
+    // photos stacked, and the share of portrait slots follows the share of portraits.
+    void parquetPlacesPhotosByOrientation()
+    {
+        // Slots of 20 x 28 px, cells of 20 x 28 (portrait) or 20 x 14 (landscape).
+        QImage base = solidImage(QSize(160, 112), QColor(122, 122, 122));
+        QSize grid(8, 4);
+
+        QList<QColor> portraitColors{QColor(120, 120, 130)};
+        QList<QColor> landscapeColors{QColor(120, 130, 120), QColor(125, 125, 125), QColor(115, 120, 125),
+                                      QColor(120, 115, 120)};
+        QList<QString> files;
+        for (int i = 0; i < portraitColors.size(); ++i)
+            files << saveImage(QString("pq-portrait%1.png").arg(i), solidImage(QSize(20, 30), portraitColors[i]));
+        for (int i = 0; i < landscapeColors.size(); ++i)
+            files << saveImage(QString("pq-landscape%1.png").arg(i), solidImage(QSize(30, 20), landscapeColors[i]));
+
+        auto isOneOf = [](QRgb pixel, const QList<QColor> &colors) {
+            for (const QColor &c : colors)
+                if (similar(QColor(pixel), c, 2))
+                    return true;
+            return false;
+        };
+
+        for (Matching matching : {Matching::ColorLayout, Matching::MeanColor})
+        {
+            ImageProcessing processing;
+            processing.processMosaicImages(files);
+            processing.processGrid(base, grid);
+            QVERIFY(processing.generateImage(base.size(), grid, 0, 0, 0.0, matching, false, Pattern::Parquet));
+            const QImage *out = processing.getOutputImage();
+
+            std::vector<bool> portrait(grid.width() * grid.height());
+            for (int sy = 0; sy < grid.height(); ++sy)
+            {
+                for (int sx = 0; sx < grid.width(); ++sx)
+                {
+                    QRgb top = out->pixel(sx * 20 + 10, sy * 28 + 7);
+                    QRgb bottom = out->pixel(sx * 20 + 10, sy * 28 + 21);
+
+                    if (isOneOf(top, portraitColors))
+                    {
+                        QCOMPARE(bottom, top);   // one photo over the whole slot
+                        portrait[sy * grid.width() + sx] = true;
+                    }
+                    else
+                    {
+                        QVERIFY(isOneOf(top, landscapeColors));
+                        QVERIFY(isOneOf(bottom, landscapeColors));
+                        QVERIFY(top != bottom);   // two photos, even with variation 0
+                    }
+                }
+            }
+
+            // 1 portrait and 4 landscape photos: 2 * 1 / (4 + 2 * 1) of the 32 slots.
+            QCOMPARE(int(std::count(portrait.begin(), portrait.end(), true)), 11);
+
+            // In an even area portraits are spread out instead of filling whole rows.
+            for (int sy = 0; sy < grid.height(); ++sy)
+                for (int sx = 0; sx + 1 < grid.width(); ++sx)
+                    QVERIFY(!(portrait[sy * grid.width() + sx] && portrait[sy * grid.width() + sx + 1]));
+        }
+    }
+
+    // With photos of only one orientation, every slot takes that orientation.
+    void parquetWithOneOrientation()
+    {
+        QImage base = solidImage(QSize(80, 56), QColor(100, 100, 100));
+        QSize grid(4, 2);
+
+        auto portraitSlots = [&](const QList<QString> &files) {
+            ImageProcessing processing;
+            processing.processMosaicImages(files);
+            processing.processGrid(base, grid);
+            processing.generateImage(base.size(), grid, 0, 0, 0.0, Matching::MeanColor, false, Pattern::Parquet);
+            const QImage *out = processing.getOutputImage();
+
+            int count = 0;
+            for (int sy = 0; sy < grid.height(); ++sy)
+                for (int sx = 0; sx < grid.width(); ++sx)
+                    if (out->pixel(sx * 20 + 10, sy * 28 + 7) == out->pixel(sx * 20 + 10, sy * 28 + 21))
+                        ++count;
+            return count;
+        };
+
+        QList<QString> landscapes{saveImage("one-l1.png", solidImage(QSize(30, 20), QColor(100, 100, 110))),
+                                  saveImage("one-l2.png", solidImage(QSize(30, 20), QColor(110, 100, 100)))};
+        QList<QString> portraits{saveImage("one-p1.png", solidImage(QSize(20, 30), QColor(100, 100, 110))),
+                                 saveImage("one-p2.png", solidImage(QSize(20, 30), QColor(110, 100, 100)))};
+
+        QCOMPARE(portraitSlots(landscapes), 0);
+        QCOMPARE(portraitSlots(portraits), 8);
+    }
+
+    // Odd slot sizes: the stacked cells together fill the slot, nothing stays empty.
+    void parquetCoversOddSizes()
+    {
+        QImage base = solidImage(QSize(101, 143), QColor(90, 140, 60));
+        QList<QString> files{saveImage("odd-l.png", solidImage(QSize(30, 20), QColor(90, 140, 60))),
+                             saveImage("odd-l2.png", solidImage(QSize(30, 20), QColor(95, 135, 65))),
+                             saveImage("odd-p.png", solidImage(QSize(20, 30), QColor(90, 140, 60)))};
+
+        ImageProcessing processing;
+        processing.processMosaicImages(files);
+        processing.processGrid(base, QSize(7, 7));
+        QVERIFY(processing.generateImage(base.size(), QSize(7, 7), 1, 0, 0.0, Matching::ColorLayout, false,
+                                         Pattern::Parquet));
+        const QImage *out = processing.getOutputImage();
+
+        for (int y = 0; y < out->height(); ++y)
+            for (int x = 0; x < out->width(); ++x)
+                QVERIFY2(qAlpha(out->pixel(x, y)) == 255, qPrintable(QString("pixel %1,%2 is empty").arg(x).arg(y)));
+    }
+
+    // "Use every photo" also works with the parquet pattern.
+    void parquetUsesEveryImage()
+    {
+        QImage base = solidImage(QSize(200, 140), QColor(30, 30, 30));
+        QList<QString> files;
+        files << saveImage("pqe-dark-l.png", solidImage(QSize(30, 20), QColor(30, 30, 30)));
+        files << saveImage("pqe-dark-p.png", solidImage(QSize(20, 30), QColor(30, 30, 45)));
+        for (int i = 0; i < 3; ++i)
+        {
+            files << saveImage(QString("pqe-l%1.png").arg(i), solidImage(QSize(30, 20), QColor(200, 60 * i, 40)));
+            files << saveImage(QString("pqe-p%1.png").arg(i), solidImage(QSize(20, 30), QColor(40, 60 * i, 200)));
+        }
+
+        ImageProcessing processing;
+        processing.processMosaicImages(files);
+        processing.processGrid(base, QSize(10, 5));
+        QVERIFY(processing.generateImage(base.size(), QSize(10, 5), 0, 0, 0.0, Matching::MeanColor, true,
+                                         Pattern::Parquet));
+        const QImage *out = processing.getOutputImage();
+
+        QSet<QRgb> seen;
+        for (int y = 0; y < out->height(); y += 2)
+            for (int x = 0; x < out->width(); x += 2)
+                seen.insert(out->pixel(x, y));
+        QCOMPARE(seen.size(), 8);
+    }
+
     // Tint blends the cell's target color into the tile (issue #13).
     void generateTint()
     {

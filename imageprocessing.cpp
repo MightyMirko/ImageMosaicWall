@@ -249,7 +249,7 @@ void ImageProcessing::processMosaicImages(const QList<QString> &imageList)
 }
 
 bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int history, int maxUses, double tint,
-                                    Matching matching)
+                                    Matching matching, bool useEveryImage)
 {
     if (!isReady())
         return false;
@@ -367,7 +367,93 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
     std::vector<int> blockedAt(numImages, -1);   // step at which an image was last seen nearby
     std::vector<int> uses(numImages, 0);
 
+    // With more images than cells, not every image can be used; each one is then
+    // used at most once instead.
+    if (useEveryImage && numImages > numCells)
+    {
+        useEveryImage = false;
+        maxUses = 1;
+    }
+
     auto underLimit = [&](int image) { return maxUses <= 0 || uses[image] < maxUses; };
+
+    // Every image first gets the free cell it fits best; the remaining cells are
+    // filled as usual below. Images that fit nowhere well go first, so they don't
+    // end up with leftovers, and they take few cells away from the others.
+    if (useEveryImage)
+    {
+        std::vector<int> images(numImages);
+        std::iota(images.begin(), images.end(), 0);
+        std::vector<std::vector<Candidate>> bestCells(numImages);   // Candidate::image is a cell here
+
+        QtConcurrent::blockingMap(images, [&](int image) {
+            if (m_skipBackgroundProcess)
+                return;
+
+            std::vector<Candidate> &best = bestCells[image];
+            best.reserve(CandidatesPerCell);
+
+            for (int cell = 0; cell < numCells; ++cell)
+            {
+                Candidate candidate{distance(cell, image), cell};
+
+                if (int(best.size()) == CandidatesPerCell)
+                {
+                    if (!(candidate < best.back()))
+                        continue;
+
+                    best.pop_back();
+                }
+
+                best.insert(std::upper_bound(best.begin(), best.end(), candidate), candidate);
+            }
+        });
+
+        if (m_skipBackgroundProcess)
+            return false;
+
+        std::stable_sort(images.begin(), images.end(), [&](int a, int b) {
+            return bestCells[a].front().distance > bestCells[b].front().distance;
+        });
+
+        for (int image : images)
+        {
+            int chosen = -1;
+
+            for (const Candidate &candidate : bestCells[image])
+            {
+                if (assigned[candidate.image] < 0)
+                {
+                    chosen = candidate.image;
+                    break;
+                }
+            }
+
+            // All close cells are taken: the best free one of the whole grid. There is
+            // one, since there are at least as many cells as images.
+            if (chosen < 0)
+            {
+                double best = std::numeric_limits<double>::max();
+
+                for (int cell = 0; cell < numCells; ++cell)
+                {
+                    if (assigned[cell] >= 0)
+                        continue;
+
+                    double d = distance(cell, image);
+
+                    if (d < best)
+                    {
+                        best = d;
+                        chosen = cell;
+                    }
+                }
+            }
+
+            assigned[chosen] = image;
+            ++uses[image];
+        }
+    }
 
     // Best image in the whole list that passes the given test, or -1.
     auto bestOf = [&](int cell, auto &&allowed) {
@@ -394,6 +480,11 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
     for (int step = 0; step < numCells; ++step)
     {
         int cell = order[step];
+
+        // Already taken by an image that had to be placed somewhere.
+        if (assigned[cell] >= 0)
+            continue;
+
         int cx = cell % gridWidth;
         int cy = cell / gridWidth;
 

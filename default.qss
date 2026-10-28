@@ -111,6 +111,28 @@ QPushButton:pressed, ProgressButton:pressed {
   background-color: #989899;
 }
 
+QCheckBox {
+  font-family: 'Source Sans Pro';
+  color: #98abb2;
+  spacing: 8px;
+  min-height: 30px;
+}
+
+QCheckBox::indicator {
+  width: 16px;
+  height: 16px;
+  background-color: #3B4252;
+  border: 1px solid #98abb2;
+}
+
+QCheckBox::indicator:checked {
+  background-color: #98abb2;
+}
+
+QCheckBox::indicator:disabled {
+  border-color: #4c566a;
+}
+
 QComboBox {
   font-family: 'Source Sans Pro';
   background-color: #3B4252;

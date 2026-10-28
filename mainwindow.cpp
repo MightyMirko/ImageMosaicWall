@@ -153,6 +153,7 @@ void MainWindow::loadSettings()
     comboIndex(ui->cbRawFiles, "RawFiles");
     ui->slHistory->setValue(settings.value("Variation", ui->slHistory->value()).toInt());
     ui->sbMaxUses->setValue(settings.value("MaxUses", ui->sbMaxUses->value()).toInt());
+    ui->cbEveryPhoto->setChecked(settings.value("EveryPhoto", ui->cbEveryPhoto->isChecked()).toBool());
     ui->sbTint->setValue(settings.value("Tint", ui->sbTint->value()).toInt());
     comboIndex(ui->cbMatching, "Matching");
     ui->sbRows->setValue(settings.value("GridRows", ui->sbRows->value()).toInt());
@@ -170,6 +171,7 @@ void MainWindow::saveSettings() const
     settings.setValue("RawFiles", ui->cbRawFiles->currentIndex());
     settings.setValue("Variation", ui->slHistory->value());
     settings.setValue("MaxUses", ui->sbMaxUses->value());
+    settings.setValue("EveryPhoto", ui->cbEveryPhoto->isChecked());
     settings.setValue("Tint", ui->sbTint->value());
     settings.setValue("Matching", ui->cbMatching->currentIndex());
     settings.setValue("GridRows", ui->sbRows->value());
@@ -237,6 +239,7 @@ void MainWindow::toggleUI(bool enabled)
     ui->sbWidth->setEnabled(enabled);
     ui->slHistory->setEnabled(enabled);
     ui->sbMaxUses->setEnabled(enabled);
+    ui->cbEveryPhoto->setEnabled(enabled);
     ui->sbTint->setEnabled(enabled);
     ui->cbMatching->setEnabled(enabled);
 }
@@ -464,6 +467,7 @@ void MainWindow::on_btnGenerate_clicked()
     QSize gridSize = QSize(ui->sbCols->value(), ui->sbRows->value());
     int history = m_variations[ui->slHistory->value()];
     int maxUses = ui->sbMaxUses->value();
+    bool everyPhoto = ui->cbEveryPhoto->isChecked();
     double tint = ui->sbTint->value() / 100.0;
     // The combo box entries are in the order of the Matching values.
     Matching matching = static_cast<Matching>(ui->cbMatching->currentIndex());
@@ -476,7 +480,7 @@ void MainWindow::on_btnGenerate_clicked()
         if (gridChanged)
             m_imageProcessing.processGrid(baseImage, gridSize);
 
-        m_imageProcessing.generateImage(baseImage.size(), gridSize, history, maxUses, tint, matching);
+        m_imageProcessing.generateImage(baseImage.size(), gridSize, history, maxUses, tint, matching, everyPhoto);
     });
     connect(m_mosaicGeneration, SIGNAL(finished()), this, SLOT(onMosaicCreationFinished()));
     m_mosaicGeneration->start();

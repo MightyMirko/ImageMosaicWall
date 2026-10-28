@@ -4,6 +4,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QSet>
 #include <QStandardPaths>
 #include <QImage>
 #include <QImageReader>
@@ -464,6 +465,66 @@ private slots:
         for (int count : tooLow)
             total += count;
         QCOMPARE(total, 16);
+    }
+
+    // "Use every photo at least once" (issue #14): even photos that fit nowhere appear,
+    // each in the cell it fits best.
+    void generateUsesEveryImage()
+    {
+        // A dark base with a light top-left corner; one image fits the base, the
+        // others only roughly the corner.
+        QImage base = solidImage(QSize(60, 60), QColor(20, 20, 20));
+        for (int y = 0; y < 10; ++y)
+            for (int x = 0; x < 10; ++x)
+                base.setPixelColor(x, y, QColor(240, 240, 240));
+
+        QList<QString> files;
+        files << saveImage("every-dark.png", solidImage(QSize(8, 8), QColor(20, 20, 20)));
+        for (int i = 0; i < 5; ++i)
+            files << saveImage(QString("every%1.png").arg(i), solidImage(QSize(8, 8), QColor(200, 40 * i, 255 - 40 * i)));
+
+        auto uses = [&](bool everyImage, Matching matching) {
+            ImageProcessing processing;
+            processing.processMosaicImages(files);
+            processing.processGrid(base, QSize(6, 6));
+            processing.generateImage(base.size(), QSize(6, 6), 0, 0, 0.0, matching, everyImage);
+
+            QMap<QRgb, int> result;
+            for (int cy = 0; cy < 6; ++cy)
+                for (int cx = 0; cx < 6; ++cx)
+                    ++result[processing.getOutputImage()->pixel(cx * 10 + 5, cy * 10 + 5)];
+            return result;
+        };
+
+        for (Matching matching : {Matching::ColorLayout, Matching::MeanColor})
+        {
+            QVERIFY(uses(false, matching).size() < 6);
+
+            QMap<QRgb, int> every = uses(true, matching);
+            QCOMPARE(every.size(), 6);
+            QCOMPARE(every.value(QColor(20, 20, 20).rgb()), 31);   // all the remaining cells
+        }
+    }
+
+    // With more photos than cells, every cell gets a different photo instead.
+    void generateEveryImageWithTooFewCells()
+    {
+        QList<QString> files;
+        for (int i = 0; i < 10; ++i)
+            files << saveImage(QString("few%1.png").arg(i), solidImage(QSize(8, 8), QColor(100 + i * 5, 100, 100)));
+
+        QImage base = solidImage(QSize(30, 30), QColor(100, 100, 100));
+
+        ImageProcessing processing;
+        processing.processMosaicImages(files);
+        processing.processGrid(base, QSize(3, 3));
+        QVERIFY(processing.generateImage(base.size(), QSize(3, 3), 0, 0, 0.0, Matching::MeanColor, true));
+
+        QSet<QRgb> seen;
+        for (int cy = 0; cy < 3; ++cy)
+            for (int cx = 0; cx < 3; ++cx)
+                seen.insert(processing.getOutputImage()->pixel(cx * 10 + 5, cy * 10 + 5));
+        QCOMPARE(seen.size(), 9);
     }
 
     // Tint blends the cell's target color into the tile (issue #13).

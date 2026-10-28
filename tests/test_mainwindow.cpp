@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QSettings>
 #include <QSlider>
@@ -49,6 +50,7 @@ private slots:
             child<QComboBox>(window, "cbRawFiles")->setCurrentIndex(2);
             child<QSlider>(window, "slHistory")->setValue(3);
             child<QSpinBox>(window, "sbMaxUses")->setValue(4);
+            child<QCheckBox>(window, "cbEveryPhoto")->setChecked(true);
             child<QSpinBox>(window, "sbTint")->setValue(20);
             child<QComboBox>(window, "cbMatching")->setCurrentIndex(1);
             child<QSpinBox>(window, "sbRows")->setValue(150);
@@ -59,6 +61,7 @@ private slots:
         QCOMPARE(child<QComboBox>(window, "cbRawFiles")->currentIndex(), 2);
         QCOMPARE(child<QSlider>(window, "slHistory")->value(), 3);
         QCOMPARE(child<QSpinBox>(window, "sbMaxUses")->value(), 4);
+        QVERIFY(child<QCheckBox>(window, "cbEveryPhoto")->isChecked());
         QCOMPARE(child<QSpinBox>(window, "sbTint")->value(), 20);
         QCOMPARE(child<QComboBox>(window, "cbMatching")->currentIndex(), 1);
         QCOMPARE(child<QSpinBox>(window, "sbRows")->value(), 150);

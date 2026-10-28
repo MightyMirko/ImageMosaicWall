@@ -67,9 +67,10 @@ public:
     void processGrid(const QImage &, QSize);
     void processMosaicImages(const QList<QString> &);
     // history: variation radius in cells; maxUses: how often one image may be used, 0 = no limit;
-    // tint: 0..1, how much of the cell's target color is blended into its tile.
+    // tint: 0..1, how much of the cell's target color is blended into its tile;
+    // useEveryImage: every image gets at least one cell, if there are enough cells.
     bool generateImage(QSize outputSize, QSize gridSize, int history, int maxUses = 0, double tint = 0.0,
-                       Matching matching = Matching::ColorLayout);
+                       Matching matching = Matching::ColorLayout, bool useEveryImage = false);
     bool isReady();
 
     // Where analysed tile images are cached; empty means TileCache::defaultFileName().

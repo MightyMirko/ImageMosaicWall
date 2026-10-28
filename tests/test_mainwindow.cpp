@@ -99,6 +99,10 @@ private slots:
         shape->setCurrentIndex(1);   // 3:2
         QCOMPARE(rows->value(), 30);
 
+        shape->setCurrentIndex(7);   // mixed: upright slots of 1 : sqrt(2)
+        QCOMPARE(rows->value(), qRound(200 * 30 * ParquetSlotAspect / 300));
+        QVERIFY(!rows->isEnabled());
+
         shape->setCurrentIndex(0);   // free
         QVERIFY(rows->isEnabled());
         rows->setValue(55);

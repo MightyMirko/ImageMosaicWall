@@ -495,6 +495,7 @@ void MainWindow::on_btnGenerate_clicked()
     int history = m_variations[ui->slHistory->value()];
     int maxUses = ui->sbMaxUses->value();
     bool everyPhoto = ui->cbEveryPhoto->isChecked();
+    Pattern pattern = ui->cbTileShape->currentIndex() == MixedTileShape ? Pattern::Parquet : Pattern::Grid;
     double tint = ui->sbTint->value() / 100.0;
     // The combo box entries are in the order of the Matching values.
     Matching matching = static_cast<Matching>(ui->cbMatching->currentIndex());
@@ -507,7 +508,8 @@ void MainWindow::on_btnGenerate_clicked()
         if (gridChanged)
             m_imageProcessing.processGrid(baseImage, gridSize);
 
-        m_imageProcessing.generateImage(baseImage.size(), gridSize, history, maxUses, tint, matching, everyPhoto);
+        m_imageProcessing.generateImage(baseImage.size(), gridSize, history, maxUses, tint, matching, everyPhoto,
+                                        pattern);
     });
     connect(m_mosaicGeneration, SIGNAL(finished()), this, SLOT(onMosaicCreationFinished()));
     m_mosaicGeneration->start();

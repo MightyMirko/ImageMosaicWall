@@ -117,6 +117,7 @@ set(imagemosaicwall_core_SRCS ${CMAKE_SOURCE_DIR}/mainwindow.cpp
                               ${CMAKE_SOURCE_DIR}/progressbutton.cpp
                               ${CMAKE_SOURCE_DIR}/asyncdirectoryscanner.cpp
                               ${CMAKE_SOURCE_DIR}/tilecache.cpp
+                              ${CMAKE_SOURCE_DIR}/tiffwriter.cpp
                               ${i18n_QRC_SRCS}
                               ${i18n_QM}
 )

@@ -1,4 +1,5 @@
 #include "imageprocessing.h"
+#include "tiffwriter.h"
 
 #include <QColor>
 #include <QDateTime>
@@ -625,6 +626,57 @@ private slots:
         QVERIFY(processing.hasMosaic());
         QCOMPARE(processing.mosaicSize(), QSize(1500, 1000));
         QVERIFY(similar(processing.renderRegion(QRect(1400, 900, 50, 50)).pixelColor(10, 10), Qt::red, 0));
+    }
+
+    void tiffWriter_data()
+    {
+        QTest::addColumn<bool>("bigTiff");
+        QTest::newRow("TIFF") << false;
+        QTest::newRow("BigTIFF") << true;
+    }
+
+    // Issue #18: large mosaics are saved as TIFF in strips, without the whole image in memory.
+    void tiffWriter()
+    {
+        QFETCH(bool, bigTiff);
+
+        QImage image(37, 23, QImage::Format_ARGB32);
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 0; x < image.width(); ++x)
+                image.setPixel(x, y, qRgb(x * 7, y * 11, (x * y) % 256));
+
+        QString path = m_dir.filePath(bigTiff ? "strips-big.tif" : "strips.tif");
+        TiffWriter writer;
+        writer.setForceBigTiff(bigTiff);
+        QVERIFY(writer.open(path, image.size(), 150));
+        QVERIFY(writer.writeRows(image.copy(0, 0, 37, 10)));
+        QVERIFY(writer.writeRows(image.copy(0, 10, 37, 1)));
+        QVERIFY(!writer.close());   // rows missing
+        QVERIFY(!writer.errorString().isEmpty());
+
+        QVERIFY(writer.open(path, image.size(), 150));
+        QCOMPARE(writer.isBigTiff(), bigTiff);
+        QVERIFY(writer.writeRows(image.copy(0, 0, 37, 10)));
+        QVERIFY(writer.writeRows(image.copy(0, 10, 37, 13)));
+        QVERIFY(!writer.writeRows(image.copy(0, 0, 37, 1)));   // one too many
+        QVERIFY(writer.open(path, image.size(), 150));
+        QVERIFY(writer.writeRows(image));
+        QVERIFY(writer.close());
+
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QByteArray header = file.read(4);
+        QCOMPARE(header, bigTiff ? QByteArray("II\x2b\x00", 4) : QByteArray("II\x2a\x00", 4));
+        QVERIFY(file.size() > qint64(37 * 23 * 3));
+        file.close();
+
+        if (!QImageReader::supportedImageFormats().contains("tiff"))
+            QSKIP("Qt has no TIFF reader here to read the file back");
+
+        QImage read(path);
+        QCOMPARE(read.size(), image.size());
+        QVERIFY(similar(read.convertToFormat(QImage::Format_RGB32), image.convertToFormat(QImage::Format_RGB32), 0));
+        QCOMPARE(qRound(read.dotsPerMeterX() * 0.0254), 150);
     }
 
     // Issue #20: in the parquet pattern a slot holds one portrait photo or two landscape

@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <numeric>
+#include <limits>
 #include <QDateTime>
 #include <QDebug>
 #include <QDir>
@@ -25,17 +27,26 @@
 #   define kerErrorMessage ErrorCode::kerErrorMessage
 #endif
 
-template<class RandomIt>
-void my_random_shuffle(RandomIt first, RandomIt last)
+namespace
 {
-    typedef typename std::iterator_traits<RandomIt>::difference_type diff_t;
 
-    for (diff_t i = last - first - 1; i > 0; --i)
+struct Candidate
+{
+    double distance;
+    int image;
+
+    // Ties are broken by image index, so the order never depends on chance.
+    bool operator<(const Candidate &other) const
     {
-        using std::swap;
-        swap(first[i], first[std::rand() % (i + 1)]);
+        return distance < other.distance || (distance == other.distance && image < other.image);
     }
-}
+};
+
+// How many of the best matching images are kept per cell. Only when all of them are
+// already used nearby is the whole list searched again.
+const int CandidatesPerCell = 64;
+
+} // namespace
 
 ImageProcessing::ImageProcessing(QObject *parent)
     : QObject(parent)
@@ -63,7 +74,7 @@ void ImageProcessing::processMosaicImages(const QList<QString> &imageList)
     cache.store(m_newCacheEntries);
     m_newCacheEntries.clear();
 
-    // The search in calculateMosaicPositions() compares every image with every cell.
+    // The search in generateImage() compares every image with every cell.
     // Convert the mean colors to Lab once here instead of for every cell, and keep
     // them in plain vectors (in the map's sorted order, so ties resolve as before).
     m_imagePaths.clear();
@@ -87,16 +98,11 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
     int numCells = gridSize.width() * gridSize.height();
 
     // The cell colors must have been calculated for this exact grid, otherwise
-    // calculateMosaicPositions() reads past the end of m_gridColorMap.
+    // generateImage() reads past the end of m_gridColorMap.
     if (m_gridColorMap.size() != static_cast<size_t>(numCells))
         return false;
 
     m_outputSize = outputSize;
-    m_historySize = history;
-
-    int maxThreads = QThreadPool::globalInstance()->maxThreadCount();
-    int itemsPerThread = numCells / maxThreads;
-    QThreadPool pool;
 
     m_outputImage = std::unique_ptr<QImage>(new QImage(outputSize, QImage::Format_ARGB32));
     m_outputImage->fill(Qt::transparent);
@@ -106,35 +112,127 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
     m_outputBits = m_outputImage->bits();
     m_outputBytesPerLine = m_outputImage->bytesPerLine();
 
-    m_gridMapCache.clear();
+    QSize cellSize(qCeil(outputSize.width() / double(gridSize.width())),
+                   qCeil(outputSize.height() / double(gridSize.height())));
+    int gridWidth = gridSize.width();
+    int numImages = int(m_imagePaths.size());
 
-    QList<QFuture<void>> jobs;
-    int numCellsPerThread = itemsPerThread;
-    for (int t = 0; t < maxThreads; ++t)
+    std::vector<int> cells(numCells);
+    std::iota(cells.begin(), cells.end(), 0);
+
+    // 1. In parallel: the best matching images for every cell.
+
+    std::vector<ColorLab> cellLabs(numCells);
+    for (int cell = 0; cell < numCells; ++cell)
     {
-        if (t == (maxThreads - 1))
-        {
-            numCellsPerThread += numCells % maxThreads;
-        }
-
-#if (QT_VERSION >= QT_VERSION_CHECK(6, 0, 0))
-
-        jobs << QtConcurrent::run(
-            &pool, &ImageProcessing::calculateMosaicPositions, this, gridSize, t * itemsPerThread, numCellsPerThread);
-
-#else
-
-        jobs << QtConcurrent::run(
-            &pool, this, &ImageProcessing::calculateMosaicPositions, gridSize, t * itemsPerThread, numCellsPerThread);
-
-#endif
-
+        QColor color = m_gridColorMap[cell];
+        cellLabs[cell] = toLab(color);
     }
 
-    for (auto &job : jobs)
-        job.waitForFinished();
+    std::vector<std::vector<Candidate>> candidates(numCells);
 
-    return true;
+    QtConcurrent::blockingMap(cells, [&](int cell) {
+        if (m_skipBackgroundProcess)
+            return;
+
+        // Keep a sorted list of the best ones while scanning. Once it is full, almost
+        // every image is rejected by one comparison with the worst entry.
+        std::vector<Candidate> &best = candidates[cell];
+        best.reserve(CandidatesPerCell);
+
+        for (int i = 0; i < numImages; ++i)
+        {
+            Candidate candidate{calculateDistance(cellLabs[cell], m_imageLabs[i]), i};
+
+            if (int(best.size()) == CandidatesPerCell)
+            {
+                if (!(candidate < best.back()))
+                    continue;
+
+                best.pop_back();
+            }
+
+            best.insert(std::upper_bound(best.begin(), best.end(), candidate), candidate);
+        }
+    });
+
+    if (m_skipBackgroundProcess)
+        return false;
+
+    // 2. One cell after the other, so every choice sees all choices made before it.
+    // Cells whose best match is worst go first: they depend most on their few good
+    // images, which easier cells would otherwise take. No randomness is involved, so
+    // the same settings always give the same mosaic, whatever the number of threads.
+
+    std::vector<int> order = cells;
+    std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
+        return candidates[a].front().distance > candidates[b].front().distance;
+    });
+
+    std::vector<int> assigned(numCells, -1);
+    std::vector<int> blockedAt(numImages, -1);   // step at which an image was last seen nearby
+
+    for (int step = 0; step < numCells; ++step)
+    {
+        int cell = order[step];
+        int cx = cell % gridWidth;
+        int cy = cell / gridWidth;
+
+        // Images already used within the variation radius are not allowed here.
+        for (int y = qMax(0, cy - history); y <= qMin(gridSize.height() - 1, cy + history); ++y)
+        {
+            for (int x = qMax(0, cx - history); x <= qMin(gridWidth - 1, cx + history); ++x)
+            {
+                int used = assigned[y * gridWidth + x];
+                if (used >= 0)
+                    blockedAt[used] = step;
+            }
+        }
+
+        int chosen = -1;
+
+        for (const Candidate &candidate : candidates[cell])
+        {
+            if (blockedAt[candidate.image] != step)
+            {
+                chosen = candidate.image;
+                break;
+            }
+        }
+
+        // All close candidates are used nearby: look through all images.
+        if (chosen < 0)
+        {
+            double best = std::numeric_limits<double>::max();
+
+            for (int i = 0; i < numImages; ++i)
+            {
+                double distance = calculateDistance(cellLabs[cell], m_imageLabs[i]);
+
+                if (blockedAt[i] != step && distance < best)
+                {
+                    best = distance;
+                    chosen = i;
+                }
+            }
+        }
+
+        // Every image is used nearby (small folder or high variation): repeat the best one
+        // rather than leaving the cell empty.
+        if (chosen < 0)
+            chosen = candidates[cell].front().image;
+
+        assigned[cell] = chosen;
+    }
+
+    // 3. In parallel: load, crop and draw the tiles. Cells never overlap.
+
+    QtConcurrent::blockingMap(cells, [&](int cell) {
+        if (!m_skipBackgroundProcess)
+            renderCell(cell, m_imagePaths[assigned[cell]], cellSize, gridWidth);
+    });
+
+    return !m_skipBackgroundProcess;
 }
 
 void ImageProcessing::calculateGridCellsMean(const QImage &baseImage,
@@ -266,111 +364,34 @@ void ImageProcessing::calculateImageMeanMap(const QList<QString> imageList,
     QtConcurrent::map(imageList, scale).waitForFinished();
 }
 
-void ImageProcessing::calculateMosaicPositions(const QSize gridSize, const int startPos, const int length)
+void ImageProcessing::renderCell(int cell, const QString &imagePath, QSize cellSize, int gridWidth)
 {
-    QVector<QString> history;
+    GridPoint p(cell % gridWidth, cell / gridWidth);
 
-    double gx = ceil(m_outputSize.width() / static_cast<float>(gridSize.width()));
-    double gy = ceil(m_outputSize.height() / static_cast<float>(gridSize.height()));
-    QSize cellSize(gx, gy);
+    QImage image = extractThumbnail(imagePath, cellSize);
+    if (image.isNull())
+        image = loadOrientedImage(imagePath, cellSize);
 
-    std::vector<uint32_t> positions;
-    for (uint32_t i = startPos; i < startPos + length; ++i)
-        positions.push_back(i);
+    // Fill the cell and crop the overflow evenly from both sides, keeping the center.
+    QImage scaled = image.scaled(cellSize, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+    QPoint cropOrigin((scaled.width() - cellSize.width()) / 2, (scaled.height() - cellSize.height()) / 2);
+    QImage cellImage = scaled.copy(QRect(cropOrigin, cellSize)).convertToFormat(QImage::Format_ARGB32);
 
-    my_random_shuffle(positions.begin(), positions.end());
-    for (auto pos : positions)
+    emit mosaicGenerated(p);
+
+    // Each cell is a separate region of the buffer, so threads never write the same pixels.
+    int x0 = p.x() * cellSize.width();
+    int y0 = p.y() * cellSize.height();
+    int w = qMin(cellImage.width(), m_outputSize.width() - x0);
+    int h = qMin(cellImage.height(), m_outputSize.height() - y0);
+
+    // With a rounded-up cell size the last rows/columns can start past the image edge.
+    if (w <= 0 || h <= 0)
+        return;
+
+    for (int y = 0; y < h; ++y)
     {
-        if (m_skipBackgroundProcess)
-        {
-            qDebug() << "skip because of cancel";
-            return;
-        }
-
-        history.clear();
-        double bestDistance = INT_MAX;
-        QString imagePath;
-        QColor cellMean = m_gridColorMap.at(pos);
-        ColorLab cellMeanLab = toLab(cellMean);
-
-        GridPoint p;
-        p.setX(pos % gridSize.width());
-        p.setY(pos / gridSize.width());
-
-        QMutexLocker gridLock(&m_lockGrid);
-        for (int kx = -m_historySize; kx <= m_historySize; ++kx)
-        {
-            for (int ky = -m_historySize; ky <= m_historySize; ++ky)
-            {
-                GridPoint pDelta(p.x() + kx, p.y() + ky);
-
-                if (pDelta.x() < 0 || pDelta.x() > gridSize.width() - 1)
-                    continue;
-
-                if (pDelta.y() < 0 || pDelta.y() > gridSize.height() - 1)
-                    continue;
-
-                if (m_gridMapCache.contains(pDelta))
-                    history.push_back(m_gridMapCache.value(pDelta));
-            }
-        }
-        gridLock.unlock();
-
-        // Best match ignoring the history, used when every image is already placed
-        // nearby (small folder or high variation). Without it the cell stayed empty.
-        double bestAnyDistance = INT_MAX;
-        QString bestAnyPath;
-
-        // brute force knn should be replaced by kd-tree
-        for (size_t i = 0; i < m_imagePaths.size(); ++i)
-        {
-            const QString &image = m_imagePaths[i];
-            double dist = calculateDistance(cellMeanLab, m_imageLabs[i]);
-
-            if (dist < bestAnyDistance)
-            {
-                bestAnyPath = image;
-                bestAnyDistance = dist;
-            }
-
-            if (dist < bestDistance && history.contains(image) == false)
-            {
-                imagePath = image;
-                bestDistance = dist;
-            }
-        }
-
-        if (imagePath.isEmpty())
-            imagePath = bestAnyPath;
-
-        QImage image = extractThumbnail(imagePath, cellSize);
-        if (image.isNull())
-            image = loadOrientedImage(imagePath, cellSize);
-
-        // Fill the cell and crop the overflow evenly from both sides, keeping the center.
-        QImage scaled = image.scaled(cellSize, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
-        QPoint cropOrigin((scaled.width() - cellSize.width()) / 2, (scaled.height() - cellSize.height()) / 2);
-        QImage cellImage = scaled.copy(QRect(cropOrigin, cellSize)).convertToFormat(QImage::Format_ARGB32);
-
-        gridLock.relock();
-        m_gridMapCache.insert(p, imagePath);
-        gridLock.unlock();
-        emit mosaicGenerated(p);
-
-        // Cells never overlap, so each thread writes to its own region of the buffer.
-        int x0 = p.x() * cellSize.width();
-        int y0 = p.y() * cellSize.height();
-        int w = qMin(cellImage.width(), m_outputSize.width() - x0);
-        int h = qMin(cellImage.height(), m_outputSize.height() - y0);
-
-        // With a rounded-up cell size the last rows/columns can start past the image edge.
-        if (w <= 0 || h <= 0)
-            continue;
-
-        for (int y = 0; y < h; ++y)
-        {
-            memcpy(m_outputBits + (y0 + y) * m_outputBytesPerLine + x0 * 4, cellImage.constScanLine(y), w * 4);
-        }
+        memcpy(m_outputBits + (y0 + y) * m_outputBytesPerLine + x0 * 4, cellImage.constScanLine(y), w * 4);
     }
 }
 

@@ -70,7 +70,7 @@ signals:
 private:
     void calculateGridCellsMean(const QImage &, const QSize &, std::vector<QColor> &, int, int);
     void calculateImageMeanMap(const QList<QString>, const QHash<QString, TileCache::Entry> &cached);
-    void calculateMosaicPositions(const QSize, const int, const int);
+    void renderCell(int cell, const QString &imagePath, QSize cellSize, int gridWidth);
     double calculateDistance(QColor rhs, QColor lhs) const;
     double calculateDistance(ColorLab rhs, ColorLab lhs) const;
 
@@ -84,15 +84,12 @@ private:
     QMap<QString, QColor> m_imageMeanMap;
     std::vector<QString> m_imagePaths;
     std::vector<ColorLab> m_imageLabs;
-    QMap<GridPoint, QString> m_gridMapCache;
     QMutex m_lockMean;
-    QMutex m_lockGrid;
     QSize m_outputSize;
     std::shared_ptr<QImage> m_outputImage;
     uchar *m_outputBits = nullptr;
     qsizetype m_outputBytesPerLine = 0;
     std::atomic<bool> m_skipBackgroundProcess;
-    int m_historySize;
     QString m_cacheFile;
     std::atomic<int> m_cacheHits{0};
     QList<QPair<QString, TileCache::Entry>> m_newCacheEntries;

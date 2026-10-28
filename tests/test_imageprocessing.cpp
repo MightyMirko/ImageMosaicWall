@@ -9,6 +9,8 @@
 #include <QImageReader>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QThread>
+#include <QThreadPool>
 
 #include <exiv2/exiv2.hpp>
 
@@ -349,6 +351,67 @@ private slots:
         QVERIFY(similar(out->pixelColor(0, 0), Qt::green, 0));
         QVERIFY(similar(out->pixelColor(5, 5), Qt::green, 0));
         QVERIFY(similar(out->pixelColor(9, 9), Qt::green, 0));
+    }
+
+    // The same settings must give the same mosaic, whatever the number of threads (issue #15).
+    void generateIsReproducible()
+    {
+        QList<QString> files;
+        for (int i = 0; i < 40; ++i)
+            files << saveImage(QString("repro%1.png").arg(i), solidImage(QSize(8, 8), QColor::fromHsv(i * 9, 200, 100 + i * 3)));
+
+        QImage base(120, 80, QImage::Format_RGB32);
+        for (int y = 0; y < base.height(); ++y)
+            for (int x = 0; x < base.width(); ++x)
+                base.setPixelColor(x, y, QColor::fromHsv((x * 3) % 360, 200, 120 + y));
+
+        auto generate = [&](int threads) {
+            int previous = QThreadPool::globalInstance()->maxThreadCount();
+            QThreadPool::globalInstance()->setMaxThreadCount(threads);
+
+            ImageProcessing processing;
+            processing.processMosaicImages(files);
+            processing.processGrid(base, QSize(24, 16));
+            bool ok = processing.generateImage(base.size(), QSize(24, 16), 2);
+            QImage out = ok ? *processing.getOutputImage() : QImage();
+
+            QThreadPool::globalInstance()->setMaxThreadCount(previous);
+            return out;
+        };
+
+        QImage single = generate(1);
+        QImage parallel = generate(QThread::idealThreadCount() > 1 ? QThread::idealThreadCount() : 4);
+
+        QVERIFY(!single.isNull());
+        QVERIFY(single == parallel);
+        QVERIFY(single == generate(1));
+    }
+
+    // With variation 1, no image may appear in any of the 8 neighbouring cells, even
+    // though one image is the best match for every cell.
+    void generateRespectsVariation()
+    {
+        QList<QString> files;
+        for (int i = 0; i < 12; ++i)
+            files << saveImage(QString("var%1.png").arg(i), solidImage(QSize(8, 8), QColor(100 + i * 10, 100, 100)));
+
+        QImage base = solidImage(QSize(60, 60), QColor(100, 100, 100));
+
+        ImageProcessing processing;
+        processing.processMosaicImages(files);
+        processing.processGrid(base, QSize(6, 6));
+        QVERIFY(processing.generateImage(base.size(), QSize(6, 6), 1));
+
+        const QImage *out = processing.getOutputImage();
+        auto cellColor = [&](int cx, int cy) { return out->pixel(cx * 10 + 5, cy * 10 + 5); };
+
+        for (int cy = 0; cy < 6; ++cy)
+            for (int cx = 0; cx < 6; ++cx)
+                for (int ny = qMax(0, cy - 1); ny <= qMin(5, cy + 1); ++ny)
+                    for (int nx = qMax(0, cx - 1); nx <= qMin(5, cx + 1); ++nx)
+                        if (nx != cx || ny != cy)
+                            QVERIFY2(cellColor(cx, cy) != cellColor(nx, ny),
+                                     qPrintable(QString("cells %1,%2 and %3,%4 use the same image").arg(cx).arg(cy).arg(nx).arg(ny)));
     }
 
     // Grid that doesn't divide the output evenly: cells that start past the

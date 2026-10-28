@@ -86,7 +86,8 @@ signals:
 private:
     void calculateGridCellsMean(const QImage &, const QSize &, std::vector<QColor> &, int, int);
     void calculateImageMeanMap(const QList<QString>, const QHash<QString, TileCache::Entry> &cached);
-    void renderCell(int cell, const QString &imagePath, QSize cellSize, int gridWidth, double tint);
+    QImage loadTile(const QString &imagePath, QSize cellSize) const;
+    void drawCell(int cell, QImage tile, QSize cellSize, int gridWidth, double tint);
     double calculateDistance(QColor rhs, QColor lhs) const;
     double calculateDistance(ColorLab rhs, ColorLab lhs) const;
 

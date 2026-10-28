@@ -81,7 +81,7 @@ The analysis of the tile images is cached in a small SQLite database, so setting
 
 # Settings
 
-The options (RAW files, variation, max. uses, tint, matching, grid) and the last used folders are remembered between sessions, in `~/.config/ImageMosaicWall/ImageMosaicWall.ini` on Linux and the matching user configuration folder on Windows and macOS. Delete the file to go back to the defaults.
+The options (RAW files, variation, max. uses, every photo, tint, matching, grid) and the last used folders are remembered between sessions, in `~/.config/ImageMosaicWall/ImageMosaicWall.ini` on Linux and the matching user configuration folder on Windows and macOS. Delete the file to go back to the defaults.
 
 # Roadmap
 

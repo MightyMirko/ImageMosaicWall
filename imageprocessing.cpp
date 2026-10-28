@@ -1063,6 +1063,15 @@ QList<QString> withoutRawDuplicates(const QList<QString> &files)
     return result;
 }
 
+int rowsForTileAspect(QSize imageSize, int columns, double tileAspect)
+{
+    if (imageSize.isEmpty() || columns <= 0 || tileAspect <= 0.0)
+        return 1;
+
+    // Cells are imageWidth / columns wide and that divided by tileAspect high.
+    return qMax(1, qRound(imageSize.height() * columns * tileAspect / imageSize.width()));
+}
+
 QString suggestedMosaicFileName(const QString &baseImagePath, const QString &folder)
 {
     QFileInfo base(baseImagePath);

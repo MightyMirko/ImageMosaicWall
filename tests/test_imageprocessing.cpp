@@ -158,6 +158,17 @@ private slots:
         QVERIFY(suggestedMosaicFileName(QString()).endsWith("mosaic.png"));
     }
 
+    // Issue #19: rows for tiles of a fixed shape.
+    void rowsForTileShape()
+    {
+        QCOMPARE(rowsForTileAspect(QSize(3000, 2000), 30, 3.0 / 2.0), 30);   // 100 x 66.7 px
+        QCOMPARE(rowsForTileAspect(QSize(3000, 2000), 30, 1.0), 20);         // 100 x 100 px
+        QCOMPARE(rowsForTileAspect(QSize(2000, 3000), 20, 2.0 / 3.0), 20);   // 100 x 150 px
+        QCOMPARE(rowsForTileAspect(QSize(5464, 8192), 100, 3.0 / 2.0), 225);
+        QCOMPARE(rowsForTileAspect(QSize(4000, 100), 10, 1.0), 1);           // never 0
+        QCOMPARE(rowsForTileAspect(QSize(), 10, 1.0), 1);
+    }
+
     // With a folder, e.g. where the last mosaic was saved, the name is unique there.
     void suggestedFileNameInFolder()
     {

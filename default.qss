@@ -157,6 +157,10 @@ QSpinBox {
   padding: 5px 10px 5px 5px;
 }
 
+QSpinBox:disabled, QComboBox:disabled {
+  color: #5d6677;
+}
+
 QSpinBox::down-button, QSpinBox::up-button {
   color: #989899;
   background-color: #98abb2;

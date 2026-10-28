@@ -10,6 +10,7 @@
 #include <QMessageBox>
 #include <QSettings>
 #include <QString>
+#include <iterator>
 #include "asyncdirectoryscanner.h"
 #include "progressbutton.h"
 #include "ui_mainwindow.h"
@@ -48,6 +49,10 @@ MainWindow::MainWindow(QWidget *parent)
     qRegisterMetaType<GridPoint>("GridPoint");
     connect(ui->sbRows, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::onGridPropsValueChanged);
     connect(ui->sbCols, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::onGridPropsValueChanged);
+
+    // With a fixed tile shape the rows follow from the columns.
+    connect(ui->sbCols, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::applyTileShape);
+    connect(ui->cbTileShape, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::applyTileShape);
     connect(ui->btnSetResolution, SIGNAL(clicked(bool)), this, SLOT(onOutputResolutionChanged()));
 
     // The combo box entries are in the order of the RawFiles values.
@@ -158,6 +163,7 @@ void MainWindow::loadSettings()
     comboIndex(ui->cbMatching, "Matching");
     ui->sbRows->setValue(settings.value("GridRows", ui->sbRows->value()).toInt());
     ui->sbCols->setValue(settings.value("GridColumns", ui->sbCols->value()).toInt());
+    comboIndex(ui->cbTileShape, "TileShape");
 
     m_lastImageFolder = settings.value("LastImageFolder").toString();
     m_lastTileFolder = settings.value("LastTileFolder").toString();
@@ -176,6 +182,7 @@ void MainWindow::saveSettings() const
     settings.setValue("Matching", ui->cbMatching->currentIndex());
     settings.setValue("GridRows", ui->sbRows->value());
     settings.setValue("GridColumns", ui->sbCols->value());
+    settings.setValue("TileShape", ui->cbTileShape->currentIndex());
 
     settings.setValue("LastImageFolder", m_lastImageFolder);
     settings.setValue("LastTileFolder", m_lastTileFolder);
@@ -234,7 +241,8 @@ void MainWindow::toggleUI(bool enabled)
     ui->btnTilesFromHost->setEnabled(enabled);
 
     ui->sbCols->setEnabled(enabled);
-    ui->sbRows->setEnabled(enabled);
+    ui->sbRows->setEnabled(enabled && tileAspect() <= 0.0);
+    ui->cbTileShape->setEnabled(enabled);
     ui->sbHeight->setEnabled(enabled);
     ui->sbWidth->setEnabled(enabled);
     ui->slHistory->setEnabled(enabled);
@@ -262,6 +270,7 @@ void MainWindow::loadImage(QString &filename)
 
     ui->sbWidth->setValue(m_baseImage.width());
     ui->sbHeight->setValue(m_baseImage.height());
+    applyTileShape();
 
     QSize gridSize = QSize(ui->sbCols->value(), ui->sbRows->value());
 
@@ -376,6 +385,23 @@ void MainWindow::scaleLockedImageSize(bool senderIsWidth)
     }
 }
 
+double MainWindow::tileAspect() const
+{
+    int index = ui->cbTileShape->currentIndex();
+    return index >= 0 && index < int(std::size(m_tileAspects)) ? m_tileAspects[index] : 0.0;
+}
+
+void MainWindow::applyTileShape()
+{
+    double aspect = tileAspect();
+    ui->sbRows->setEnabled(aspect <= 0.0 && ui->sbCols->isEnabled());
+
+    // The spin box keeps the rows within its range, so with extreme image shapes the
+    // tiles get close to, but not exactly, the chosen shape.
+    if (aspect > 0.0 && !m_baseImage.isNull())
+        ui->sbRows->setValue(rowsForTileAspect(m_baseImage.size(), ui->sbCols->value(), aspect));
+}
+
 void MainWindow::on_btnLoad_clicked()
 {
     QString filename = QFileDialog::getOpenFileName(this,
@@ -407,6 +433,7 @@ void MainWindow::onOutputResolutionChanged()
     m_baseImage = m_baseImage.scaled(res);
     m_processedGridSize = QSize();
     m_imageView.setImage(m_baseImage);
+    applyTileShape();
     onGridPropsValueChanged();
     ui->btnSave->setEnabled(false);
 }

@@ -203,6 +203,9 @@ QImage loadOrientedImage(const QString &filename, QSize minSize = QSize());
 // in folder if given, otherwise next to the base image.
 QString suggestedMosaicFileName(const QString &baseImagePath, const QString &folder = QString());
 QStringList supportedImageNameFilters();
+// The number of grid rows that makes cells of tileAspect (width / height) when an image
+// of imageSize is divided into columns; at least 1.
+int rowsForTileAspect(QSize imageSize, int columns, double tileAspect);
 QList<QString> withoutRawDuplicates(const QList<QString> &files);
 
 // How camera RAW files in the tile folder are used.

@@ -814,6 +814,58 @@
                    </property>
                   </widget>
                  </item>
+                 <item row="2" column="0">
+                  <widget class="QLabel" name="lblTileShape">
+                   <property name="toolTip">
+                    <string>The shape of the tiles. With a fixed shape the rows follow from the columns and the image size, so photos taken in that shape are not cropped. Free: the shape follows from rows and columns.</string>
+                   </property>
+                   <property name="text">
+                    <string>Tile shape</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="2" column="1">
+                  <widget class="QComboBox" name="cbTileShape">
+                   <property name="toolTip">
+                    <string>The shape of the tiles. With a fixed shape the rows follow from the columns and the image size, so photos taken in that shape are not cropped. Free: the shape follows from rows and columns.</string>
+                   </property>
+                   <item>
+                    <property name="text">
+                     <string>Free</string>
+                    </property>
+                   </item>
+                   <item>
+                    <property name="text">
+                     <string>3:2 landscape</string>
+                    </property>
+                   </item>
+                   <item>
+                    <property name="text">
+                     <string>2:3 portrait</string>
+                    </property>
+                   </item>
+                   <item>
+                    <property name="text">
+                     <string>4:3 landscape</string>
+                    </property>
+                   </item>
+                   <item>
+                    <property name="text">
+                     <string>3:4 portrait</string>
+                    </property>
+                   </item>
+                   <item>
+                    <property name="text">
+                     <string>16:9 landscape</string>
+                    </property>
+                   </item>
+                   <item>
+                    <property name="text">
+                     <string>1:1 square</string>
+                    </property>
+                   </item>
+                  </widget>
+                 </item>
                  <item row="0" column="1" alignment="Qt::AlignHCenter">
                   <widget class="QLabel" name="label_4">
                    <property name="text">

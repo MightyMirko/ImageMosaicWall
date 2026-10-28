@@ -42,6 +42,8 @@ private:
   void loadImageFolder(QString &);
   void loadTileImages(const QList<QString> &files);
   void scaleLockedImageSize(bool senderIsWidth);
+  double tileAspect() const;
+  void applyTileShape();
 
 signals:
   void mosaicCalculationFinished(QMap<GridPoint, QImage> &);
@@ -74,6 +76,8 @@ private:
   QSize m_processedGridSize;
 
   const ushort m_variations[6] = {0, 1, 3, 9, 11, 15};
+  // Width / height for the entries of the tile shape combo box; 0 is "Free".
+  const double m_tileAspects[7] = {0.0, 3.0 / 2.0, 2.0 / 3.0, 4.0 / 3.0, 3.0 / 4.0, 16.0 / 9.0, 1.0};
   QString m_currentFolder;
   QString m_lastImageFolder;
   QString m_lastTileFolder;

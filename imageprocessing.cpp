@@ -196,6 +196,98 @@ LabLayout cellLayout(const QImage &image, const QRect &cell, QColor mean)
     return result;
 }
 
+double labDistance(const ColorLab &x, const ColorLab &y)
+{
+    return std::abs(x.L - y.L) + std::abs(x.a - y.a) + std::abs(x.b - y.b);
+}
+
+// The average of a layout's colors. The distance of two layouts is never smaller
+// than the distance of their averages, which makes it a cheap lower bound.
+ColorLab averageColor(const LabLayout &layout)
+{
+    ColorLab sum{0.0, 0.0, 0.0};
+
+    for (const ColorLab &c : layout)
+    {
+        sum.L += c.L;
+        sum.a += c.a;
+        sum.b += c.b;
+    }
+
+    int n = int(layout.size());
+    return ColorLab{sum.L / n, sum.a / n, sum.b / n};
+}
+
+// Searches items for the count best matches of one query, best first; equal to
+// computing distance() for every item and keeping the count smallest, but faster:
+// items are visited outwards from the query's lightness in byLightness (indexes
+// sorted by keys[i].L), and an item whose key is already further away from the
+// query's key than the worst kept match is skipped without computing distance().
+// That requires distance(i) >= labDistance(query, keys[i]) for every item.
+template <typename Distance>
+std::vector<Candidate> bestMatches(int count, const ColorLab &query, const std::vector<ColorLab> &keys,
+                                   const std::vector<int> &byLightness, Distance &&distance)
+{
+    // Rounding can make a bound a tiny bit larger than the distance it bounds.
+    const double tolerance = 1e-9;
+
+    std::vector<Candidate> best;
+    best.reserve(count + 1);
+
+    auto full = [&]() { return int(best.size()) == count; };
+
+    auto consider = [&](int item) {
+        if (full() && labDistance(query, keys[item]) > best.back().distance + tolerance)
+            return;
+
+        Candidate candidate{distance(item), item};
+
+        if (full())
+        {
+            if (!(candidate < best.back()))
+                return;
+
+            best.pop_back();
+        }
+
+        best.insert(std::upper_bound(best.begin(), best.end(), candidate), candidate);
+    };
+
+    int n = int(byLightness.size());
+    auto above = std::lower_bound(byLightness.begin(), byLightness.end(), query.L,
+                                  [&](int item, double L) { return keys[item].L < L; });
+    int up = int(above - byLightness.begin());
+    int down = up - 1;
+
+    // The lightness difference alone is a lower bound too; once it exceeds the worst
+    // kept match in one direction, everything further in that direction does as well.
+    while (up < n || down >= 0)
+    {
+        double upGap = up < n ? keys[byLightness[up]].L - query.L : std::numeric_limits<double>::max();
+        double downGap = down >= 0 ? query.L - keys[byLightness[down]].L : std::numeric_limits<double>::max();
+        double gap = std::min(upGap, downGap);
+
+        if (full() && gap > best.back().distance + tolerance)
+            break;
+
+        if (upGap <= downGap)
+            consider(byLightness[up++]);
+        else
+            consider(byLightness[down--]);
+    }
+
+    return best;
+}
+
+// Item indexes sorted by the lightness of their keys.
+std::vector<int> sortedByLightness(const std::vector<ColorLab> &keys)
+{
+    std::vector<int> order(keys.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return keys[a].L < keys[b].L; });
+    return order;
+}
+
 } // namespace
 
 ImageProcessing::ImageProcessing(QObject *parent)
@@ -323,31 +415,24 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
         return sum / (CellLayoutSize * CellLayoutSize);
     };
 
+    // One color per cell and image that bounds the distance from below: the mean color
+    // itself, or with layouts the average of the layout's colors. See bestMatches().
+    std::vector<ColorLab> cellKeys(numCells);
+    std::vector<ColorLab> imageKeys(numImages);
+
+    for (int cell = 0; cell < numCells; ++cell)
+        cellKeys[cell] = layoutMatching ? averageColor(cellLayouts[cell]) : cellLabs[cell];
+
+    for (int i = 0; i < numImages; ++i)
+        imageKeys[i] = layoutMatching ? averageColor(tileLayouts[i]) : m_imageLabs[i];
+
+    std::vector<int> imagesByLightness = sortedByLightness(imageKeys);
     std::vector<std::vector<Candidate>> candidates(numCells);
 
     QtConcurrent::blockingMap(cells, [&](int cell) {
-        if (m_skipBackgroundProcess)
-            return;
-
-        // Keep a sorted list of the best ones while scanning. Once it is full, almost
-        // every image is rejected by one comparison with the worst entry.
-        std::vector<Candidate> &best = candidates[cell];
-        best.reserve(CandidatesPerCell);
-
-        for (int i = 0; i < numImages; ++i)
-        {
-            Candidate candidate{distance(cell, i), i};
-
-            if (int(best.size()) == CandidatesPerCell)
-            {
-                if (!(candidate < best.back()))
-                    continue;
-
-                best.pop_back();
-            }
-
-            best.insert(std::upper_bound(best.begin(), best.end(), candidate), candidate);
-        }
+        if (!m_skipBackgroundProcess)
+            candidates[cell] = bestMatches(CandidatesPerCell, cellKeys[cell], imageKeys, imagesByLightness,
+                                           [&](int image) { return distance(cell, image); });
     });
 
     if (m_skipBackgroundProcess)
@@ -386,27 +471,12 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
         std::iota(images.begin(), images.end(), 0);
         std::vector<std::vector<Candidate>> bestCells(numImages);   // Candidate::image is a cell here
 
+        std::vector<int> cellsByLightness = sortedByLightness(cellKeys);
+
         QtConcurrent::blockingMap(images, [&](int image) {
-            if (m_skipBackgroundProcess)
-                return;
-
-            std::vector<Candidate> &best = bestCells[image];
-            best.reserve(CandidatesPerCell);
-
-            for (int cell = 0; cell < numCells; ++cell)
-            {
-                Candidate candidate{distance(cell, image), cell};
-
-                if (int(best.size()) == CandidatesPerCell)
-                {
-                    if (!(candidate < best.back()))
-                        continue;
-
-                    best.pop_back();
-                }
-
-                best.insert(std::upper_bound(best.begin(), best.end(), candidate), candidate);
-            }
+            if (!m_skipBackgroundProcess)
+                bestCells[image] = bestMatches(CandidatesPerCell, imageKeys[image], cellKeys, cellsByLightness,
+                                               [&](int cell) { return distance(cell, image); });
         });
 
         if (m_skipBackgroundProcess)

@@ -90,7 +90,7 @@ void ImageProcessing::processMosaicImages(const QList<QString> &imageList)
     }
 }
 
-bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int history)
+bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int history, int maxUses)
 {
     if (!isReady())
         return false;
@@ -171,6 +171,31 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
 
     std::vector<int> assigned(numCells, -1);
     std::vector<int> blockedAt(numImages, -1);   // step at which an image was last seen nearby
+    std::vector<int> uses(numImages, 0);
+
+    auto underLimit = [&](int image) { return maxUses <= 0 || uses[image] < maxUses; };
+
+    // Best image in the whole list that passes the given test, or -1.
+    auto bestOf = [&](int cell, auto &&allowed) {
+        int chosen = -1;
+        double best = std::numeric_limits<double>::max();
+
+        for (int i = 0; i < numImages; ++i)
+        {
+            if (!allowed(i))
+                continue;
+
+            double distance = calculateDistance(cellLabs[cell], m_imageLabs[i]);
+
+            if (distance < best)
+            {
+                best = distance;
+                chosen = i;
+            }
+        }
+
+        return chosen;
+    };
 
     for (int step = 0; step < numCells; ++step)
     {
@@ -189,40 +214,36 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
             }
         }
 
+        auto notNearby = [&](int image) { return blockedAt[image] != step; };
         int chosen = -1;
 
         for (const Candidate &candidate : candidates[cell])
         {
-            if (blockedAt[candidate.image] != step)
+            if (notNearby(candidate.image) && underLimit(candidate.image))
             {
                 chosen = candidate.image;
                 break;
             }
         }
 
-        // All close candidates are used nearby: look through all images.
+        // All close candidates are used nearby or used up: look through all images.
         if (chosen < 0)
-        {
-            double best = std::numeric_limits<double>::max();
+            chosen = bestOf(cell, [&](int i) { return notNearby(i) && underLimit(i); });
 
-            for (int i = 0; i < numImages; ++i)
-            {
-                double distance = calculateDistance(cellLabs[cell], m_imageLabs[i]);
+        // There are more cells than the rules allow (small folder, high variation or a low
+        // use limit). Rather repeat an image nearby than exceed the limit, and rather exceed
+        // the limit than leave the cell empty.
+        if (chosen < 0 && maxUses > 0)
+            chosen = bestOf(cell, underLimit);
 
-                if (blockedAt[i] != step && distance < best)
-                {
-                    best = distance;
-                    chosen = i;
-                }
-            }
-        }
+        if (chosen < 0)
+            chosen = bestOf(cell, notNearby);
 
-        // Every image is used nearby (small folder or high variation): repeat the best one
-        // rather than leaving the cell empty.
         if (chosen < 0)
             chosen = candidates[cell].front().image;
 
         assigned[cell] = chosen;
+        ++uses[chosen];
     }
 
     // 3. In parallel: load, crop and draw the tiles. Cells never overlap.

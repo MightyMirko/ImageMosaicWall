@@ -158,6 +158,7 @@ void MainWindow::toggleUI(bool enabled)
     ui->sbHeight->setEnabled(enabled);
     ui->sbWidth->setEnabled(enabled);
     ui->slHistory->setEnabled(enabled);
+    ui->sbMaxUses->setEnabled(enabled);
 }
 
 void MainWindow::loadImage(QString &filename)
@@ -379,6 +380,7 @@ void MainWindow::on_btnGenerate_clicked()
     // Read all widget state here on the GUI thread; the generation thread must not touch the UI.
     QSize gridSize = QSize(ui->sbCols->value(), ui->sbRows->value());
     int history = m_variations[ui->slHistory->value()];
+    int maxUses = ui->sbMaxUses->value();
     bool gridChanged = gridSize != m_processedGridSize;
     QImage baseImage = m_baseImage;
     m_processedGridSize = gridSize;
@@ -387,7 +389,7 @@ void MainWindow::on_btnGenerate_clicked()
         if (gridChanged)
             m_imageProcessing.processGrid(baseImage, gridSize);
 
-        m_imageProcessing.generateImage(baseImage.size(), gridSize, history);
+        m_imageProcessing.generateImage(baseImage.size(), gridSize, history, maxUses);
     });
     connect(m_mosaicGeneration, SIGNAL(finished()), this, SLOT(onMosaicCreationFinished()));
     m_mosaicGeneration->start();

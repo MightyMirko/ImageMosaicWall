@@ -414,6 +414,42 @@ private slots:
                                      qPrintable(QString("cells %1,%2 and %3,%4 use the same image").arg(cx).arg(cy).arg(nx).arg(ny)));
     }
 
+    // A use limit spreads a uniform area over several images (issue #14).
+    void generateRespectsUseLimit()
+    {
+        QList<QString> files;
+        for (int i = 0; i < 4; ++i)
+            files << saveImage(QString("limit%1.png").arg(i), solidImage(QSize(8, 8), QColor(100 + i * 20, 100, 100)));
+
+        QImage base = solidImage(QSize(40, 40), QColor(100, 100, 100));
+
+        auto usesPerImage = [&](int maxUses) {
+            ImageProcessing processing;
+            processing.processMosaicImages(files);
+            processing.processGrid(base, QSize(4, 4));
+            processing.generateImage(base.size(), QSize(4, 4), 0, maxUses);
+
+            QMap<QRgb, int> uses;
+            for (int cy = 0; cy < 4; ++cy)
+                for (int cx = 0; cx < 4; ++cx)
+                    ++uses[processing.getOutputImage()->pixel(cx * 10 + 5, cy * 10 + 5)];
+            return uses;
+        };
+
+        QCOMPARE(usesPerImage(0).size(), 1);           // no limit: the best image everywhere
+
+        QMap<QRgb, int> limited = usesPerImage(4);     // 16 cells, 4 images, at most 4 each
+        QCOMPARE(limited.size(), 4);
+        for (int count : limited)
+            QCOMPARE(count, 4);
+
+        QMap<QRgb, int> tooLow = usesPerImage(2);      // impossible: still every cell filled
+        int total = 0;
+        for (int count : tooLow)
+            total += count;
+        QCOMPARE(total, 16);
+    }
+
     // Grid that doesn't divide the output evenly: cells that start past the
     // image edge are skipped instead of writing outside the buffer.
     void generateWithUnevenGrid()

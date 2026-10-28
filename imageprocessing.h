@@ -54,7 +54,8 @@ public:
     void processCanceled(bool canceled);
     void processGrid(const QImage &, QSize);
     void processMosaicImages(const QList<QString> &);
-    bool generateImage(QSize, QSize, int);
+    // history: variation radius in cells; maxUses: how often one image may be used, 0 = no limit.
+    bool generateImage(QSize outputSize, QSize gridSize, int history, int maxUses = 0);
     bool isReady();
 
     // Where analysed tile images are cached; empty means TileCache::defaultFileName().

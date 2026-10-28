@@ -524,7 +524,7 @@
                   <string>Resolution of the output image</string>
                  </property>
                  <property name="text">
-                  <string>Output Resolution</string>
+                  <string>Output Size</string>
                  </property>
                  <property name="alignment">
                   <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignVCenter</set>
@@ -642,6 +642,86 @@
                    </property>
                   </widget>
                  </item>
+                 <item row="2" column="0">
+                  <widget class="QDoubleSpinBox" name="sbPrintWidth">
+                   <property name="toolTip">
+                    <string>The printed size at the chosen resolution. Changing it changes the size in pixels.</string>
+                   </property>
+                   <property name="alignment">
+                    <set>Qt::AlignCenter</set>
+                   </property>
+                   <property name="decimals">
+                    <number>1</number>
+                   </property>
+                   <property name="maximum">
+                    <double>100000.0</double>
+                   </property>
+                   <property name="suffix">
+                    <string> cm</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="2" column="2">
+                  <widget class="QDoubleSpinBox" name="sbPrintHeight">
+                   <property name="toolTip">
+                    <string>The printed size at the chosen resolution. Changing it changes the size in pixels.</string>
+                   </property>
+                   <property name="alignment">
+                    <set>Qt::AlignCenter</set>
+                   </property>
+                   <property name="decimals">
+                    <number>1</number>
+                   </property>
+                   <property name="maximum">
+                    <double>100000.0</double>
+                   </property>
+                   <property name="suffix">
+                    <string> cm</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="3" column="0">
+                  <widget class="QComboBox" name="cbPrintUnit">
+                   <property name="toolTip">
+                    <string>Unit of the print size.</string>
+                   </property>
+                   <item>
+                    <property name="text">
+                     <string>cm</string>
+                    </property>
+                   </item>
+                   <item>
+                    <property name="text">
+                     <string>inch</string>
+                    </property>
+                   </item>
+                  </widget>
+                 </item>
+                 <item row="3" column="2">
+                  <widget class="QSpinBox" name="sbDpi">
+                   <property name="toolTip">
+                    <string>Print resolution in dots per inch. 300 dpi is usual for photo prints viewed from close, 150 dpi is enough for posters. It is also stored in the saved file.</string>
+                   </property>
+                   <property name="alignment">
+                    <set>Qt::AlignCenter</set>
+                   </property>
+                   <property name="suffix">
+                    <string> dpi</string>
+                   </property>
+                   <property name="minimum">
+                    <number>30</number>
+                   </property>
+                   <property name="maximum">
+                    <number>1200</number>
+                   </property>
+                   <property name="singleStep">
+                    <number>50</number>
+                   </property>
+                   <property name="value">
+                    <number>300</number>
+                   </property>
+                  </widget>
+                 </item>
                  <item row="1" column="1">
                   <widget class="QPushButton" name="btnLockRatio">
                    <property name="sizePolicy">
@@ -688,38 +768,13 @@
                <item>
                 <layout class="QHBoxLayout" name="horizontalLayout_5"/>
                </item>
-               <item alignment="Qt::AlignHCenter">
-                <widget class="QPushButton" name="btnSetResolution">
-                 <property name="enabled">
-                  <bool>false</bool>
-                 </property>
-                 <property name="minimumSize">
-                  <size>
-                   <width>200</width>
-                   <height>0</height>
-                  </size>
-                 </property>
-                 <property name="maximumSize">
-                  <size>
-                   <width>200</width>
-                   <height>16777215</height>
-                  </size>
-                 </property>
+               <item>
+                <widget class="QLabel" name="lblOutputInfo">
                  <property name="text">
-                  <string> Set Resolution</string>
+                  <string/>
                  </property>
-                 <property name="icon">
-                  <iconset resource="assets.qrc">
-                   <normaloff>:/icons/assets/resolution.png</normaloff>:/icons/assets/resolution.png</iconset>
-                 </property>
-                 <property name="iconSize">
-                  <size>
-                   <width>32</width>
-                   <height>32</height>
-                  </size>
-                 </property>
-                 <property name="flat">
-                  <bool>false</bool>
+                 <property name="wordWrap">
+                  <bool>true</bool>
                  </property>
                 </widget>
                </item>

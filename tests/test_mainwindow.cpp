@@ -2,6 +2,8 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDoubleSpinBox>
+#include <QLabel>
 #include <QSettings>
 #include <QSlider>
 #include <QSpinBox>
@@ -57,6 +59,8 @@ private slots:
             child<QSpinBox>(window, "sbRows")->setValue(150);
             child<QSpinBox>(window, "sbCols")->setValue(80);
             child<QComboBox>(window, "cbTileShape")->setCurrentIndex(6);
+            child<QComboBox>(window, "cbPrintUnit")->setCurrentIndex(1);
+            child<QSpinBox>(window, "sbDpi")->setValue(150);
         }
 
         MainWindow window;
@@ -69,6 +73,8 @@ private slots:
         QCOMPARE(child<QSpinBox>(window, "sbRows")->value(), 150);
         QCOMPARE(child<QSpinBox>(window, "sbCols")->value(), 80);
         QCOMPARE(child<QComboBox>(window, "cbTileShape")->currentIndex(), 6);
+        QCOMPARE(child<QComboBox>(window, "cbPrintUnit")->currentIndex(), 1);
+        QCOMPARE(child<QSpinBox>(window, "sbDpi")->value(), 150);
     }
 
     // Issue #19: with a fixed tile shape, the rows follow from the columns and can't be
@@ -107,6 +113,59 @@ private slots:
         QVERIFY(rows->isEnabled());
         rows->setValue(55);
         QCOMPARE(rows->value(), 55);
+    }
+
+    // Issue #17: the output size can be set as print size and resolution.
+    void printSizeAndResolution()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QString path = dir.filePath("base.png");
+        QImage base(300, 200, QImage::Format_RGB32);
+        base.fill(Qt::gray);
+        QVERIFY(base.save(path));
+
+        MainWindow window;
+        window.onImageDropped(path);
+        QThreadPool::globalInstance()->waitForDone();
+        QCoreApplication::processEvents();
+
+        QSpinBox *width = child<QSpinBox>(window, "sbWidth");
+        QSpinBox *height = child<QSpinBox>(window, "sbHeight");
+        QDoubleSpinBox *printWidth = child<QDoubleSpinBox>(window, "sbPrintWidth");
+        QDoubleSpinBox *printHeight = child<QDoubleSpinBox>(window, "sbPrintHeight");
+        QSpinBox *dpi = child<QSpinBox>(window, "sbDpi");
+        QComboBox *unit = child<QComboBox>(window, "cbPrintUnit");
+
+        // The output starts at the base image's size.
+        QCOMPARE(width->value(), 300);
+        QCOMPARE(height->value(), 200);
+
+        dpi->setValue(300);
+        unit->setCurrentIndex(0);   // cm
+
+        // 30 x 20 cm at 300 dpi; the locked aspect ratio sets the height.
+        printWidth->setValue(30.0);
+        QCOMPARE(width->value(), 3543);
+        QCOMPARE(height->value(), 2362);
+        QCOMPARE(printHeight->value(), 20.0);
+
+        // Half the resolution, same print size: half the pixels.
+        dpi->setValue(150);
+        QCOMPARE(width->value(), 1772);
+        QCOMPARE(height->value(), 1181);
+        QCOMPARE(printWidth->value(), 30.0);
+
+        // In inches.
+        unit->setCurrentIndex(1);
+        QCOMPARE(printWidth->value(), 11.81);
+
+        // Pixels change the print size too.
+        width->setValue(1500);
+        QCOMPARE(printWidth->value(), 10.0);
+        QCOMPARE(height->value(), 1000);
+
+        QVERIFY(child<QLabel>(window, "lblOutputInfo")->text().contains("1500 x 1000 px"));
     }
 
     // Settings from a newer or broken version must not leave the window unusable.

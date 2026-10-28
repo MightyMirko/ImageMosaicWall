@@ -538,6 +538,29 @@ private slots:
         QCOMPARE(seen.size(), 9);
     }
 
+    // Issue #17: the output can be larger than the base image, which is only sampled.
+    void generateOutputLargerThanBase()
+    {
+        QImage base = solidImage(QSize(40, 30), QColor(200, 30, 30));
+        for (int y = 0; y < 30; ++y)
+            for (int x = 20; x < 40; ++x)
+                base.setPixelColor(x, y, QColor(30, 30, 200));
+
+        QList<QString> files{saveImage("big-red.png", solidImage(QSize(16, 12), QColor(200, 30, 30))),
+                             saveImage("big-blue.png", solidImage(QSize(16, 12), QColor(30, 30, 200)))};
+
+        ImageProcessing processing;
+        processing.processMosaicImages(files);
+        processing.processGrid(base, QSize(4, 3));
+        QVERIFY(processing.generateImage(QSize(400, 300), QSize(4, 3), 0));
+
+        const QImage *out = processing.getOutputImage();
+        QCOMPARE(out->size(), QSize(400, 300));
+        QVERIFY(similar(out->pixelColor(50, 150), QColor(200, 30, 30), 2));
+        QVERIFY(similar(out->pixelColor(350, 150), QColor(30, 30, 200), 2));
+        QCOMPARE(qAlpha(out->pixel(399, 299)), 255);
+    }
+
     // Issue #20: in the parquet pattern a slot holds one portrait photo or two landscape
     // photos stacked, and the share of portrait slots follows the share of portraits.
     void parquetPlacesPhotosByOrientation()

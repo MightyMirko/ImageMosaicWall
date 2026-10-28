@@ -44,6 +44,12 @@ private:
   void scaleLockedImageSize(bool senderIsWidth);
   double tileAspect() const;
   void applyTileShape();
+  QSize outputSize() const;
+  double printUnitsPerInch() const;
+  void outputSizeChanged();
+  void updatePrintSize();
+  void setPixelsFromPrintSize(bool fromWidth);
+  void updateOutputInfo();
 
 signals:
   void mosaicCalculationFinished(QMap<GridPoint, QImage> &);
@@ -51,7 +57,6 @@ signals:
 public slots:
   void on_btnLoad_clicked();
   void onGridPropsValueChanged();
-  void onOutputResolutionChanged();
   void onMosaicCreationFinished();
   void onImageDropped(QString image);
   void onFolderDropped(QString folder);
@@ -74,6 +79,7 @@ private:
   QMap<QString, QIcon> m_activeLoadingButtons;
   QSize m_lockedResolution;
   QSize m_processedGridSize;
+  int m_dpi = 300;   // the resolution the output size was last scaled for
 
   const ushort m_variations[6] = {0, 1, 3, 9, 11, 15};
   // Width / height for the entries of the tile shape combo box; 0 is "Free", the last

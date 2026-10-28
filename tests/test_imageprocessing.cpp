@@ -157,6 +157,22 @@ private slots:
         QVERIFY(suggestedMosaicFileName(QString()).endsWith("mosaic.png"));
     }
 
+    // With a folder, e.g. where the last mosaic was saved, the name is unique there.
+    void suggestedFileNameInFolder()
+    {
+        QString base = saveImage("IMG_5678.jpg", solidImage(QSize(8, 8), Qt::red));
+        QTemporaryDir other;
+        QVERIFY(other.isValid());
+        QDir dir(other.path());
+
+        QCOMPARE(suggestedMosaicFileName(base, other.path()), dir.filePath("IMG_5678_mosaic.png"));
+
+        QVERIFY(solidImage(QSize(8, 8), Qt::red).save(dir.filePath("IMG_5678_mosaic.png")));
+        QCOMPARE(suggestedMosaicFileName(base, other.path()), dir.filePath("IMG_5678_mosaic_2.png"));
+
+        QCOMPARE(suggestedMosaicFileName(QString(), other.path()), dir.filePath("mosaic.png"));
+    }
+
     void imageNameFilters()
     {
         QStringList filters = supportedImageNameFilters();

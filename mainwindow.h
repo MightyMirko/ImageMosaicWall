@@ -29,7 +29,13 @@ public:
   // albums and tags. chooseFiles returns the chosen files, or nothing if cancelled.
   void setTileSource(const QString &text, std::function<QList<QString>()> chooseFiles);
 
+protected:
+  void closeEvent(QCloseEvent *event) override;
+
 private:
+  void loadSettings();
+  void saveSettings() const;
+  QString startFolder(const QString &lastFolder) const;
   void updateStatus();
   void toggleUI(bool enabled);
   void loadImage(QString &);
@@ -69,6 +75,9 @@ private:
 
   const ushort m_variations[6] = {0, 1, 3, 9, 11, 15};
   QString m_currentFolder;
+  QString m_lastImageFolder;
+  QString m_lastTileFolder;
+  QString m_lastSaveFolder;
   QString m_baseImagePath;
   QList<QString> m_tileFiles;
   std::function<QList<QString>()> m_chooseTileFiles;

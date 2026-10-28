@@ -1,5 +1,6 @@
 
 #include "mainwindow.h"
+#include <QCloseEvent>
 #include <QDebug>
 #include <QDir>
 #include <QDirIterator>
@@ -7,6 +8,7 @@
 #include <QFileInfo>
 #include <QFutureWatcher>
 #include <QMessageBox>
+#include <QSettings>
 #include <QString>
 #include "asyncdirectoryscanner.h"
 #include "progressbutton.h"
@@ -14,6 +16,16 @@
 #include "i18nutils.h"
 
 using namespace QtConcurrent;
+
+namespace {
+
+// Settings are kept in an INI file on every platform (also instead of the Windows
+// registry), e.g. ~/.config/ImageMosaicWall/ImageMosaicWall.ini.
+const QSettings::Format SettingsFormat = QSettings::IniFormat;
+const char SettingsOrganization[] = "ImageMosaicWall";
+const char SettingsApplication[] = "ImageMosaicWall";
+
+} // namespace
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -113,13 +125,79 @@ MainWindow::MainWindow(QWidget *parent)
 
         ui->lblVariation->setText(val);
     });
+
+    // After the connections, so the restored slider position also updates its label.
+    loadSettings();
 }
 
 MainWindow::~MainWindow()
 {
+    saveSettings();
     delete ui;
 
     s_cleanupI18nResource();
+}
+
+void MainWindow::loadSettings()
+{
+    QSettings settings(SettingsFormat, QSettings::UserScope, SettingsOrganization, SettingsApplication);
+
+    // Spin boxes and the slider clamp out of range values themselves; combo box
+    // indexes are checked, since an invalid one would select nothing.
+    auto comboIndex = [&](QComboBox *box, const QString &key) {
+        int index = settings.value(key, box->currentIndex()).toInt();
+        if (index >= 0 && index < box->count())
+            box->setCurrentIndex(index);
+    };
+
+    comboIndex(ui->cbRawFiles, "RawFiles");
+    ui->slHistory->setValue(settings.value("Variation", ui->slHistory->value()).toInt());
+    ui->sbMaxUses->setValue(settings.value("MaxUses", ui->sbMaxUses->value()).toInt());
+    ui->sbTint->setValue(settings.value("Tint", ui->sbTint->value()).toInt());
+    comboIndex(ui->cbMatching, "Matching");
+    ui->sbRows->setValue(settings.value("GridRows", ui->sbRows->value()).toInt());
+    ui->sbCols->setValue(settings.value("GridColumns", ui->sbCols->value()).toInt());
+
+    m_lastImageFolder = settings.value("LastImageFolder").toString();
+    m_lastTileFolder = settings.value("LastTileFolder").toString();
+    m_lastSaveFolder = settings.value("LastSaveFolder").toString();
+}
+
+void MainWindow::saveSettings() const
+{
+    QSettings settings(SettingsFormat, QSettings::UserScope, SettingsOrganization, SettingsApplication);
+
+    settings.setValue("RawFiles", ui->cbRawFiles->currentIndex());
+    settings.setValue("Variation", ui->slHistory->value());
+    settings.setValue("MaxUses", ui->sbMaxUses->value());
+    settings.setValue("Tint", ui->sbTint->value());
+    settings.setValue("Matching", ui->cbMatching->currentIndex());
+    settings.setValue("GridRows", ui->sbRows->value());
+    settings.setValue("GridColumns", ui->sbCols->value());
+
+    settings.setValue("LastImageFolder", m_lastImageFolder);
+    settings.setValue("LastTileFolder", m_lastTileFolder);
+    settings.setValue("LastSaveFolder", m_lastSaveFolder);
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    // The digiKam plugin only hides the window on close, so the destructor may run
+    // much later (or never, if digiKam crashes); save here as well.
+    saveSettings();
+    QMainWindow::closeEvent(event);
+}
+
+QString MainWindow::startFolder(const QString &lastFolder) const
+{
+    // The folder the host application opened the tool from comes first.
+    if (!m_currentFolder.isEmpty())
+        return m_currentFolder;
+
+    if (!lastFolder.isEmpty() && QDir(lastFolder).exists())
+        return lastFolder;
+
+    return QDir::homePath();
 }
 
 void MainWindow::updateStatus()
@@ -174,6 +252,7 @@ void MainWindow::loadImage(QString &filename)
         return;
 
     m_baseImagePath = filename;
+    m_lastImageFolder = QFileInfo(filename).absolutePath();
 
     if (ui->btnLockRatio->isChecked())
         m_lockedResolution = m_baseImage.size();
@@ -208,6 +287,8 @@ void MainWindow::loadImageFolder(QString &path)
 {
     if (path.isEmpty())
         return;
+
+    m_lastTileFolder = path;
 
     QStringList filter = supportedImageNameFilters();
 
@@ -296,7 +377,7 @@ void MainWindow::on_btnLoad_clicked()
 {
     QString filename = QFileDialog::getOpenFileName(this,
                                                     tr("Open Image"),
-                                                    m_currentFolder.isEmpty() ? QDir::homePath() : m_currentFolder,
+                                                    startFolder(m_lastImageFolder),
                                                     tr("Images (%1)").arg(supportedImageNameFilters().join(' ')));
     loadImage(filename);
 }
@@ -389,6 +470,7 @@ void MainWindow::on_btnGenerate_clicked()
     bool gridChanged = gridSize != m_processedGridSize;
     QImage baseImage = m_baseImage;
     m_processedGridSize = gridSize;
+    saveSettings();
 
     m_mosaicGeneration = QThread::create([=] {
         if (gridChanged)
@@ -409,9 +491,14 @@ void MainWindow::on_btnSave_clicked()
     QString pngFilter = tr("PNG (*.png)");
     QString jpegFilter = tr("JPEG (*.jpg)");
     QString selectedFilter = pngFilter;
+
+    // Suggested next to the base image, or in the folder the last mosaic was saved to.
+    bool hasSaveFolder = !m_lastSaveFolder.isEmpty() && QDir(m_lastSaveFolder).exists();
+    QString suggestion = suggestedMosaicFileName(m_baseImagePath, hasSaveFolder ? m_lastSaveFolder : QString());
+
     QString filename = QFileDialog::getSaveFileName(this,
                                                     tr("Save Mosaic Image"),
-                                                    suggestedMosaicFileName(m_baseImagePath),
+                                                    suggestion,
                                                     pngFilter + ";;" + jpegFilter,
                                                     &selectedFilter);
 
@@ -430,6 +517,8 @@ void MainWindow::on_btnSave_clicked()
                              tr("The mosaic can't be saved over its base image. Please choose another file name."));
         return;
     }
+
+    m_lastSaveFolder = QFileInfo(filename).absolutePath();
 
     // Save in the background: encoding a large mosaic, or waiting for a sleeping
     // disk to spin up, would otherwise freeze the whole window (and digiKam).
@@ -464,8 +553,11 @@ void MainWindow::on_btnSave_clicked()
 
 void MainWindow::on_btnSetImageFolder_clicked()
 {
-    QString path = QFileDialog::getExistingDirectory(
-        this, tr("Load Images Folder"), m_currentFolder.isEmpty() ? QDir::homePath() : m_currentFolder);
+    // Not startFolder(): the tile folder is usually a different, larger one than the
+    // album the tool was opened from.
+    QString start = QDir(m_lastTileFolder).exists() && !m_lastTileFolder.isEmpty() ? m_lastTileFolder
+                                                                                  : startFolder(QString());
+    QString path = QFileDialog::getExistingDirectory(this, tr("Load Images Folder"), start);
     loadImageFolder(path);
 }
 

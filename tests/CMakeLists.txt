@@ -19,5 +19,21 @@ target_link_libraries(test_imageprocessing
                       ${CMAKE_THREAD_LIBS_INIT}
 )
 
+add_executable(test_mainwindow ${CMAKE_CURRENT_SOURCE_DIR}/test_mainwindow.cpp)
+
+target_link_libraries(test_mainwindow
+
+                      imagemosaicwallcore
+
+                      Qt${QT_VERSION_MAJOR}::Core
+                      Qt${QT_VERSION_MAJOR}::Gui
+                      Qt${QT_VERSION_MAJOR}::Widgets
+                      Qt${QT_VERSION_MAJOR}::Concurrent
+                      Qt${QT_VERSION_MAJOR}::Test
+
+                      ${CMAKE_THREAD_LIBS_INIT}
+)
+
 add_test(NAME test_imageprocessing COMMAND test_imageprocessing)
-set_tests_properties(test_imageprocessing PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_test(NAME test_mainwindow COMMAND test_mainwindow)
+set_tests_properties(test_imageprocessing test_mainwindow PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

@@ -79,6 +79,10 @@ The tests run without a display.
 
 The analysis of the tile images is cached in a small SQLite database, so setting the same folder again only reads new or changed files. Inside digiKam it is stored in `~/.cache/digikam/imagemosaicwall/tiles.sqlite` on Linux (the standalone app uses its own cache folder). It is safe to delete; it is rebuilt on the next run.
 
+# Settings
+
+The options (RAW files, variation, max. uses, tint, matching, grid) and the last used folders are remembered between sessions, in `~/.config/ImageMosaicWall/ImageMosaicWall.ini` on Linux and the matching user configuration folder on Windows and macOS. Delete the file to go back to the defaults.
+
 # Roadmap
 
 Planned work is organised in [milestones](https://github.com/MightyMirko/ImageMosaicWall/milestones). Bug reports and ideas are welcome in the [issues](https://github.com/MightyMirko/ImageMosaicWall/issues).

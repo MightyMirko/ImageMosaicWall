@@ -884,19 +884,18 @@ QList<QString> withoutRawDuplicates(const QList<QString> &files)
     return result;
 }
 
-QString suggestedMosaicFileName(const QString &baseImagePath)
+QString suggestedMosaicFileName(const QString &baseImagePath, const QString &folder)
 {
-    if (baseImagePath.isEmpty())
-        return QDir::home().filePath("mosaic.png");
-
-    // Next to the base image, but never the base image itself: "IMG_1234_mosaic.png",
-    // then "IMG_1234_mosaic_2.png" and so on if that file already exists.
     QFileInfo base(baseImagePath);
-    QString stem = base.completeBaseName() + "_mosaic";
-    QString candidate = base.dir().filePath(stem + ".png");
+    QDir dir = !folder.isEmpty() ? QDir(folder) : baseImagePath.isEmpty() ? QDir::home() : base.dir();
+
+    // Never the base image itself: "IMG_1234_mosaic.png", then "IMG_1234_mosaic_2.png"
+    // and so on if that file already exists.
+    QString stem = baseImagePath.isEmpty() ? QString("mosaic") : base.completeBaseName() + "_mosaic";
+    QString candidate = dir.filePath(stem + ".png");
 
     for (int n = 2; QFileInfo::exists(candidate); ++n)
-        candidate = base.dir().filePath(QString("%1_%2.png").arg(stem).arg(n));
+        candidate = dir.filePath(QString("%1_%2.png").arg(stem).arg(n));
 
     return candidate;
 }

@@ -61,6 +61,9 @@ private slots:
             child<QComboBox>(window, "cbTileShape")->setCurrentIndex(6);
             child<QComboBox>(window, "cbPrintUnit")->setCurrentIndex(1);
             child<QSpinBox>(window, "sbDpi")->setValue(150);
+            child<QSpinBox>(window, "sbPartColumns")->setValue(3);
+            child<QSpinBox>(window, "sbPartRows")->setValue(2);
+            child<QDoubleSpinBox>(window, "sbPartOverlap")->setValue(0.5);
         }
 
         MainWindow window;
@@ -75,6 +78,10 @@ private slots:
         QCOMPARE(child<QComboBox>(window, "cbTileShape")->currentIndex(), 6);
         QCOMPARE(child<QComboBox>(window, "cbPrintUnit")->currentIndex(), 1);
         QCOMPARE(child<QSpinBox>(window, "sbDpi")->value(), 150);
+        QCOMPARE(child<QSpinBox>(window, "sbPartColumns")->value(), 3);
+        QCOMPARE(child<QSpinBox>(window, "sbPartRows")->value(), 2);
+        QCOMPARE(child<QDoubleSpinBox>(window, "sbPartOverlap")->value(), 0.5);
+        QVERIFY(child<QLabel>(window, "lblOutputInfo")->text().contains("6 parts"));
     }
 
     // Issue #19: with a fixed tile shape, the rows follow from the columns and can't be

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <numeric>
 #include <queue>
 #include <limits>
@@ -390,15 +391,8 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
     if (m_gridColorMap.size() != static_cast<size_t>(numSlots))
         return false;
 
-    m_outputSize = outputSize;
-
-    m_outputImage = std::unique_ptr<QImage>(new QImage(outputSize, QImage::Format_ARGB32));
-    m_outputImage->fill(Qt::transparent);
-
-    // Worker threads write their cells straight into the pixel buffer. Calling
-    // QImage::setPixel() from several threads is not safe, it detaches each time.
-    m_outputBits = m_outputImage->bits();
-    m_outputBytesPerLine = m_outputImage->bytesPerLine();
+    m_outputImage.reset();
+    m_placedCells.clear();
 
     int gridWidth = gridSize.width();
     int numImages = int(m_imagePaths.size());
@@ -821,31 +815,30 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
         ++uses[chosen];
     }
 
-    // 3. In parallel: load and crop each used image once, and draw it into all its
-    // cells. Cells never overlap, so images can be drawn at the same time.
+    // 3. Keep where every image goes, and draw the mosaic unless it is too large to be
+    // kept in memory as a whole; it is then drawn in parts when it is saved.
 
-    std::vector<std::vector<int>> cellsOfImage(numImages);
     for (int cell : activeCells)
-        cellsOfImage[assigned[cell]].push_back(cell);
+    {
+        int slot = cells[cell].slot;
+        m_placedCells.push_back({cells[cell].out, assigned[cell], groupTileSize[imageGroup[assigned[cell]]],
+                                 cellColors[cell], GridPoint(slot % gridWidth, slot / gridWidth)});
+    }
 
-    std::vector<int> usedImages;
-    for (int image = 0; image < numImages; ++image)
-        if (!cellsOfImage[image].empty())
-            usedImages.push_back(image);
+    m_outputSize = outputSize;
+    m_tint = tint;
 
-    QtConcurrent::blockingMap(usedImages, [&](int image) {
-        if (m_skipBackgroundProcess)
-            return;
+    if (qint64(outputSize.width()) * outputSize.height() * 4 > m_maxImageBytes)
+        return !m_skipBackgroundProcess;
 
-        QImage tile = loadTile(m_imagePaths[image], groupTileSize[imageGroup[image]]);
+    auto image = std::make_shared<QImage>(outputSize, QImage::Format_ARGB32);
+    if (image->isNull())
+        return false;
 
-        for (int cell : cellsOfImage[image])
-        {
-            int slot = cells[cell].slot;
-            drawCell(cells[cell].out, tile, cellColors[cell], tint, GridPoint(slot % gridWidth, slot / gridWidth));
-        }
-    });
+    if (!render(*image, QRect(QPoint(0, 0), outputSize), 1.0, true))
+        return false;
 
+    m_outputImage = image;
     return !m_skipBackgroundProcess;
 }
 
@@ -1008,48 +1001,133 @@ QImage ImageProcessing::loadTile(const QString &imagePath, QSize cellSize) const
     return scaled.copy(QRect(cropOrigin, cellSize)).convertToFormat(QImage::Format_ARGB32);
 }
 
-void ImageProcessing::drawCell(const QRect &cell, QImage cellImage, QColor target, double tint, GridPoint slot)
+bool ImageProcessing::render(QImage &target, const QRect &region, double scale, bool reportProgress)
 {
-    // Blend the cell's color in the base image into the tile, as the mosaic reads better
-    // from a distance: pixel = (1 - tint) * pixel + tint * target.
-    if (tint > 0.0)
-    {
-        int strength = qBound(0, qRound(tint * 256), 256);
-        int tr = target.red() * strength;
-        int tg = target.green() * strength;
-        int tb = target.blue() * strength;
+    target.fill(Qt::transparent);
 
-        for (int y = 0; y < cellImage.height(); ++y)
+    // Output coordinates are mapped to target pixels by scaling and rounding down, so
+    // neighbouring cells meet exactly also in a scaled preview.
+    auto toTarget = [&](int v) { return int(std::floor(v * scale)); };
+    QRect bounds = QRect(QPoint(0, 0), m_outputSize).intersected(region);
+    QPoint origin(toTarget(region.x()), toTarget(region.y()));
+
+    // Cells of each image within the region, so every image is loaded only once.
+    std::map<int, std::vector<const PlacedCell *>> cellsOfImage;
+    for (const PlacedCell &cell : m_placedCells)
+        if (cell.out.intersects(bounds))
+            cellsOfImage[cell.image].push_back(&cell);
+
+    std::vector<int> images;
+    for (const auto &entry : cellsOfImage)
+        images.push_back(entry.first);
+
+    uchar *bits = target.bits();
+    qsizetype bytesPerLine = target.bytesPerLine();
+    int strength = qBound(0, qRound(m_tint * 256), 256);
+
+    // In parallel per image; cells never overlap, so threads never write the same pixels.
+    QtConcurrent::blockingMap(images, [&](int image) {
+        if (m_skipBackgroundProcess)
+            return;
+
+        const std::vector<const PlacedCell *> &imageCells = cellsOfImage.at(image);
+        QSize tileSize = imageCells.front()->tileSize;
+        QSize scaledTile(qMax(1, qCeil(tileSize.width() * scale)), qMax(1, qCeil(tileSize.height() * scale)));
+        QImage tile = loadTile(m_imagePaths[image], scaledTile);
+
+        for (const PlacedCell *cell : imageCells)
         {
-            QRgb *line = reinterpret_cast<QRgb *>(cellImage.scanLine(y));
+            // The cell in target pixels, and the part of it inside the region.
+            QRect cellRect(QPoint(toTarget(cell->out.left()), toTarget(cell->out.top())),
+                           QPoint(toTarget(cell->out.right() + 1) - 1, toTarget(cell->out.bottom() + 1) - 1));
+            QRect visible = cellRect.intersected(QRect(QPoint(toTarget(bounds.left()), toTarget(bounds.top())),
+                                                       QPoint(toTarget(bounds.right() + 1) - 1,
+                                                              toTarget(bounds.bottom() + 1) - 1)));
+            visible = visible.intersected(QRect(cellRect.topLeft(), tile.size()));
 
-            for (int x = 0; x < cellImage.width(); ++x)
+            if (visible.isEmpty())
+                continue;
+
+            if (reportProgress)
+                emit mosaicGenerated(cell->slot);
+
+            // Blend the cell's color in the base image into the tile, as the mosaic reads
+            // better from a distance: pixel = (1 - tint) * pixel + tint * target.
+            int tr = cell->color.red() * strength;
+            int tg = cell->color.green() * strength;
+            int tb = cell->color.blue() * strength;
+
+            for (int y = visible.top(); y <= visible.bottom(); ++y)
             {
-                QRgb c = line[x];
-                line[x] = qRgba((qRed(c) * (256 - strength) + tr) >> 8,
-                                (qGreen(c) * (256 - strength) + tg) >> 8,
-                                (qBlue(c) * (256 - strength) + tb) >> 8,
-                                qAlpha(c));
+                const QRgb *from = reinterpret_cast<const QRgb *>(tile.constScanLine(y - cellRect.top())) +
+                                   (visible.left() - cellRect.left());
+                QRgb *to = reinterpret_cast<QRgb *>(bits + (y - origin.y()) * bytesPerLine) + (visible.left() - origin.x());
+
+                if (strength == 0)
+                {
+                    memcpy(to, from, visible.width() * 4);
+                    continue;
+                }
+
+                for (int x = 0; x < visible.width(); ++x)
+                {
+                    QRgb c = from[x];
+                    to[x] = qRgba((qRed(c) * (256 - strength) + tr) >> 8, (qGreen(c) * (256 - strength) + tg) >> 8,
+                                  (qBlue(c) * (256 - strength) + tb) >> 8, qAlpha(c));
+                }
             }
         }
-    }
+    });
 
-    emit mosaicGenerated(slot);
+    return !m_skipBackgroundProcess;
+}
 
-    // Each cell is a separate region of the buffer, so threads never write the same pixels.
-    int x0 = cell.x();
-    int y0 = cell.y();
-    int w = qMin(qMin(cellImage.width(), cell.width()), m_outputSize.width() - x0);
-    int h = qMin(qMin(cellImage.height(), cell.height()), m_outputSize.height() - y0);
+bool ImageProcessing::hasMosaic() const
+{
+    return !m_placedCells.empty();
+}
 
-    // With a rounded-up cell size the last rows/columns can start past the image edge.
-    if (w <= 0 || h <= 0)
-        return;
+QSize ImageProcessing::mosaicSize() const
+{
+    return hasMosaic() ? m_outputSize : QSize();
+}
 
-    for (int y = 0; y < h; ++y)
-    {
-        memcpy(m_outputBits + (y0 + y) * m_outputBytesPerLine + x0 * 4, cellImage.constScanLine(y), w * 4);
-    }
+QImage ImageProcessing::renderRegion(const QRect &region)
+{
+    if (!hasMosaic() || region.isEmpty())
+        return QImage();
+
+    QImage image(region.size(), QImage::Format_ARGB32);
+    if (image.isNull() || !render(image, region, 1.0, false))
+        return QImage();
+
+    return image;
+}
+
+QImage ImageProcessing::renderPreview(QSize maxSize)
+{
+    if (!hasMosaic())
+        return QImage();
+
+    double scale = qMin(1.0, qMin(maxSize.width() / double(m_outputSize.width()),
+                                  maxSize.height() / double(m_outputSize.height())));
+    QSize size(qMax(1, int(std::floor(m_outputSize.width() * scale))), qMax(1, int(std::floor(m_outputSize.height() * scale))));
+
+    QImage image(size, QImage::Format_ARGB32);
+    if (image.isNull() || !render(image, QRect(QPoint(0, 0), m_outputSize), scale, false))
+        return QImage();
+
+    return image;
+}
+
+qint64 ImageProcessing::maxImageBytes() const
+{
+    return m_maxImageBytes;
+}
+
+void ImageProcessing::setMaxImageBytes(qint64 bytes)
+{
+    m_maxImageBytes = bytes;
 }
 
 double ImageProcessing::calculateDistance(QColor rhs, QColor lhs) const

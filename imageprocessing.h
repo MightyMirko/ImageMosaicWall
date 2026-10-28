@@ -100,13 +100,27 @@ private:
     void calculateGridCellsMean(const QImage &, const QSize &, std::vector<QColor> &, int, int);
     void calculateImageMeanMap(const QList<QString>, const QHash<QString, TileCache::Entry> &cached);
     QImage loadTile(const QString &imagePath, QSize cellSize) const;
-    void drawCell(const QRect &cell, QImage tile, QColor target, double tint, GridPoint slot);
+    bool render(QImage &target, const QRect &region, double scale, bool reportProgress);
     double calculateDistance(QColor rhs, QColor lhs) const;
     double calculateDistance(ColorLab rhs, ColorLab lhs) const;
 
 public:
     std::vector<QColor> getGridColorMap() const;
+    // The mosaic of the last generateImage(), or nullptr if there is none or it is larger
+    // than maxImageBytes(); it can then be drawn in parts with renderRegion().
     const QImage *getOutputImage() const;
+
+    // Whether generateImage() has placed the photos of a mosaic, and its size.
+    bool hasMosaic() const;
+    QSize mosaicSize() const;
+    // Draws a part of that mosaic (ARGB32, region.size()), e.g. to save it in strips or
+    // as poster parts; or all of it scaled down to fit maxSize as preview. Empty if
+    // cancelled. They don't keep the result, so any size can be drawn piece by piece.
+    QImage renderRegion(const QRect &region);
+    QImage renderPreview(QSize maxSize);
+    // Mosaics up to this size in bytes (4 per pixel) are drawn by generateImage() as a whole.
+    qint64 maxImageBytes() const;
+    void setMaxImageBytes(qint64 bytes);
     QMap<QString, QColor> getImageMeanMap() const;
 
 private:
@@ -121,8 +135,21 @@ private:
     QMutex m_lockMean;
     QSize m_outputSize;
     std::shared_ptr<QImage> m_outputImage;
-    uchar *m_outputBits = nullptr;
-    qsizetype m_outputBytesPerLine = 0;
+    qint64 m_maxImageBytes = qint64(1) << 30;
+
+    // A cell of the last generated mosaic with its image: where it is drawn, the size its
+    // tile is loaded at, the target color for tint, and its slot of the grid.
+    struct PlacedCell
+    {
+        QRect out;
+        int image;
+        QSize tileSize;
+        QColor color;
+        GridPoint slot;
+    };
+
+    std::vector<PlacedCell> m_placedCells;
+    double m_tint = 0.0;
     std::atomic<bool> m_skipBackgroundProcess;
     QString m_cacheFile;
     std::atomic<int> m_cacheHits{0};

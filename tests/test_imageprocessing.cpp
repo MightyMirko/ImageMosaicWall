@@ -46,6 +46,11 @@ bool similar(const QImage &a, const QImage &b, int tolerance)
     return true;
 }
 
+bool hasTiffReader()
+{
+    return QImageReader::supportedImageFormats().contains("tiff");
+}
+
 } // namespace
 
 class TestImageProcessing : public QObject
@@ -670,8 +675,12 @@ private slots:
         QVERIFY(file.size() > qint64(37 * 23 * 3));
         file.close();
 
-        if (!QImageReader::supportedImageFormats().contains("tiff"))
+        if (!hasTiffReader())
+        {
+            // CI installs Qt's TIFF plugin, so the test must not be skipped there.
+            QVERIFY2(!qEnvironmentVariableIsSet("CI"), "Qt's TIFF plugin (qtimageformats) is missing");
             QSKIP("Qt has no TIFF reader here to read the file back");
+        }
 
         QImage read(path);
         QCOMPARE(read.size(), image.size());
@@ -695,8 +704,12 @@ private slots:
     // in memory; then PNG and JPEG are refused when a part is too large.
     void saveMosaicParts()
     {
-        if (!QImageReader::supportedImageFormats().contains("tiff"))
+        if (!hasTiffReader())
+        {
+            // CI installs Qt's TIFF plugin, so the test must not be skipped there.
+            QVERIFY2(!qEnvironmentVariableIsSet("CI"), "Qt's TIFF plugin (qtimageformats) is missing");
             QSKIP("Qt has no TIFF reader here to read the files back");
+        }
 
         QList<QString> files;
         for (int i = 0; i < 6; ++i)

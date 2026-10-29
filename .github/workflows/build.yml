@@ -19,7 +19,7 @@ jobs:
         run: >
           dnf install -y --setopt=install_weak_deps=False
           git cmake ninja-build gcc-c++
-          qt6-qtbase-devel qt6-qttools-devel exiv2-devel digikam-devel
+          qt6-qtbase-devel qt6-qttools-devel qt6-qtimageformats exiv2-devel digikam-devel
 
       - uses: actions/checkout@v4
 
@@ -29,7 +29,7 @@ jobs:
           cmake --build build-app
 
       - name: Run tests
-        run: ctest --test-dir build-app --output-on-failure --no-tests=error
+        run: ctest --test-dir build-app --output-on-failure --no-tests=error -V
 
       - name: Build digiKam plugin
         run: |
@@ -43,7 +43,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake ninja-build g++ qtbase5-dev qttools5-dev qttools5-dev-tools libqt5sql5-sqlite libexiv2-dev
+          sudo apt-get install -y --no-install-recommends cmake ninja-build g++ qtbase5-dev qttools5-dev qttools5-dev-tools libqt5sql5-sqlite qt5-image-formats-plugins libexiv2-dev
 
       - uses: actions/checkout@v4
 
@@ -53,7 +53,7 @@ jobs:
           cmake --build build
 
       - name: Run tests
-        run: ctest --test-dir build --output-on-failure --no-tests=error
+        run: ctest --test-dir build --output-on-failure --no-tests=error -V
 
   windows:
     name: Windows (MSVC, Qt 6)
@@ -68,6 +68,7 @@ jobs:
         with:
           version: '6.8.3'
           arch: win64_msvc2022_64
+          modules: qtimageformats
           cache: true
 
       - name: Cache vcpkg packages
@@ -91,7 +92,7 @@ jobs:
           cmake --build build --config RelWithDebInfo
 
       - name: Run tests
-        run: ctest --test-dir build -C RelWithDebInfo --output-on-failure --no-tests=error
+        run: ctest --test-dir build -C RelWithDebInfo --output-on-failure --no-tests=error -V
 
   macos:
     name: macOS 26 (Homebrew, Qt 6)
@@ -108,4 +109,4 @@ jobs:
           cmake --build build
 
       - name: Run tests
-        run: ctest --test-dir build --output-on-failure --no-tests=error
+        run: ctest --test-dir build --output-on-failure --no-tests=error -V

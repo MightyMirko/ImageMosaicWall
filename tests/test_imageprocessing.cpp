@@ -1032,6 +1032,125 @@ private slots:
         QCOMPARE(out->size(), base.size());
         QVERIFY(similar(out->pixelColor(99, 69), Qt::yellow, 0));
     }
+
+    // A mosaic too large to keep in memory is drawn from one cached tile per photo, and a
+    // second run reuses those files.
+    void tileCache()
+    {
+        QTemporaryDir tiles;
+        QVERIFY(tiles.isValid());
+
+        QList<QString> files;
+        for (int i = 0; i < 6; ++i)
+            files << saveImage(QString("cached%1.png").arg(i), solidImage(QSize(60, 40), QColor::fromHsv(i * 60, 200, 200)));
+
+        QImage base(120, 80, QImage::Format_RGB32);
+        for (int y = 0; y < base.height(); ++y)
+            for (int x = 0; x < base.width(); ++x)
+                base.setPixelColor(x, y, QColor::fromHsv((x * 3) % 360, 200, 200));
+
+        ImageProcessing reference;
+        reference.processMosaicImages(files);
+        reference.processGrid(base, QSize(6, 4));
+        QVERIFY(reference.generateImage(QSize(240, 160), QSize(6, 4), 1));
+        QImage expected = *reference.getOutputImage();
+
+        ImageProcessing processing;
+        processing.setTileDirectory(tiles.path());
+        processing.processMosaicImages(files);
+        processing.processGrid(base, QSize(6, 4));
+        processing.setMaxImageBytes(1);
+        QVERIFY(processing.generateImage(QSize(240, 160), QSize(6, 4), 1));
+        QVERIFY(processing.getOutputImage() == nullptr);
+
+        // One tile per photo that the mosaic uses.
+        QStringList cached = QDir(tiles.path()).entryList(QDir::Files, QDir::Name);
+        QVERIFY(cached.size() >= 1 && cached.size() <= 6);
+
+        // The tiles are PNG at the size they are drawn, so the strips match exactly.
+        QImage drawn = processing.renderRegion(QRect(QPoint(0, 0), QSize(240, 160)));
+        QVERIFY(similar(drawn, expected, 0));
+
+        // The preview is drawn at a smaller size, from the same tiles.
+        QImage preview = processing.renderPreview(QSize(120, 80));
+        QVERIFY(similar(preview, reference.renderPreview(QSize(120, 80)), 0));
+
+        QMap<QString, QDateTime> written;
+        for (const QString &name : cached)
+            written[name] = QFileInfo(tiles.filePath(name)).lastModified();
+
+        ImageProcessing again;
+        again.setTileDirectory(tiles.path());
+        again.processMosaicImages(files);
+        again.processGrid(base, QSize(6, 4));
+        again.setMaxImageBytes(1);
+        QVERIFY(again.generateImage(QSize(240, 160), QSize(6, 4), 1));
+
+        QCOMPARE(QDir(tiles.path()).entryList(QDir::Files, QDir::Name), cached);
+        for (const QString &name : cached)
+            QCOMPARE(QFileInfo(tiles.filePath(name)).lastModified(), written[name]);
+    }
+
+    // Every step reports its progress up to its total, from the photos to the drawing.
+    void stepProgress()
+    {
+        QTemporaryDir tiles;
+        QVERIFY(tiles.isValid());
+
+        QList<QString> files;
+        for (int i = 0; i < 6; ++i)
+            files << saveImage(QString("steps%1.png").arg(i), solidImage(QSize(60, 40), QColor::fromHsv(i * 60, 200, 200)));
+
+        QImage base(120, 80, QImage::Format_RGB32);
+        base.fill(Qt::gray);
+
+        struct Step
+        {
+            QString name;
+            int done;
+            int total;
+        };
+
+        QMutex mutex;
+        QList<Step> steps;
+
+        ImageProcessing processing;
+        processing.setTileDirectory(tiles.path());
+        connect(&processing, &ImageProcessing::stepProgress, &processing,
+                [&](const QString &name, int done, int total) {
+                    QMutexLocker lock(&mutex);
+                    steps << Step{name, done, total};
+                },
+                Qt::DirectConnection);
+
+        processing.processMosaicImages(files);
+        processing.processGrid(base, QSize(6, 4));
+        processing.setMaxImageBytes(1);
+        QVERIFY(processing.generateImage(QSize(240, 160), QSize(6, 4), 1));
+
+        QString error;
+        QVERIFY2(saveMosaicPart(processing, nullptr, {QRect(QPoint(0, 0), QSize(240, 160)), m_dir.filePath("steps.tif")},
+                                150, error),
+                 qPrintable(error));
+
+        for (const Step &step : steps)
+            QVERIFY(step.done >= 0 && step.done <= step.total);
+
+        const QStringList names = {"Analysing photos", "Analysing the base image", "Matching photos to cells",
+                                   "Placing photos", "Preparing tiles", "Drawing mosaic"};
+        for (const QString &name : names)
+        {
+            bool reached = false;
+            for (const Step &step : steps)
+                reached = reached || (step.name == name && step.done == step.total && step.total > 0);
+            QVERIFY2(reached, qPrintable(name));
+        }
+
+        // One tile per photo that the mosaic uses.
+        for (const Step &step : steps)
+            if (step.name == "Preparing tiles")
+                QVERIFY(step.total >= 1 && step.total <= 6);
+    }
 };
 
 QTEST_GUILESS_MAIN(TestImageProcessing)

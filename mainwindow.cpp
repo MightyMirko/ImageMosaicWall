@@ -104,6 +104,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(&m_imageProcessing, &ImageProcessing::imageProcessed, this, &MainWindow::onImageLoadPorgress);
 
     connect(&m_imageProcessing, &ImageProcessing::cellProcessed, this, &MainWindow::onImageCellProgress);
+    connect(&m_imageProcessing, &ImageProcessing::stepProgress, this, &MainWindow::onStepProgress);
 
     connect(&m_imageView, &ImageViewer::folderDropped, this, &MainWindow::onFolderDropped);
     connect(&m_imageView, &ImageViewer::imageDropped, this, &MainWindow::onImageDropped);
@@ -607,6 +608,7 @@ void MainWindow::onMosaicCreationFinished()
 
     toggleUI(true);
     ui->btnCancel->hide();
+    ui->barStep->hide();
     delete m_mosaicGeneration;
 }
 
@@ -623,23 +625,20 @@ void MainWindow::onFolderDropped(QString folder)
 void MainWindow::onImageCellProgress()
 {
     ui->btnLoad->increment();
-
-    auto current = ui->btnLoad->currentValue();
-    auto max = ui->btnLoad->maxValue();
-    auto message = tr("%1 of %2 cells processed").arg(current).arg(max);
-
-    ui->lblStatus->setText(message);
 }
 
 void MainWindow::onImageLoadPorgress()
 {
     ui->btnSetImageFolder->increment();
+}
 
-    auto current = ui->btnSetImageFolder->currentValue();
-    auto max = ui->btnSetImageFolder->maxValue();
-    auto message = tr("%1 of %2 images processed").arg(current).arg(max);
-
-    ui->lblStatus->setText(message);
+void MainWindow::onStepProgress(const QString &step, int done, int total)
+{
+    // The bar shows the step in progress, with its count, e.g. "Placing photos: 120 of 2120".
+    ui->barStep->setRange(0, qMax(1, total));
+    ui->barStep->setValue(qBound(0, done, qMax(1, total)));
+    ui->barStep->setFormat(tr("%1: %v of %m (%p%)").arg(step));
+    ui->barStep->show();
 }
 
 void MainWindow::on_btnGenerate_clicked()
@@ -648,6 +647,10 @@ void MainWindow::on_btnGenerate_clicked()
     m_imageProcessing.processCanceled(false);
     m_imageView.clearPreview();
     ui->btnCancel->show();
+    ui->barStep->setRange(0, 1);
+    ui->barStep->setValue(0);
+    ui->barStep->setFormat(tr("Starting ..."));
+    ui->barStep->show();
 
     // Read all widget state here on the GUI thread; the generation thread must not touch the UI.
     QSize gridSize = QSize(ui->sbCols->value(), ui->sbRows->value());
@@ -774,6 +777,10 @@ void MainWindow::on_btnSave_clicked()
     toggleUI(false);
     m_imageProcessing.processCanceled(false);
     ui->lblStatus->setText(tr("Saving %1 ...").arg(nativeName));
+    ui->barStep->setRange(0, 1);
+    ui->barStep->setValue(0);
+    ui->barStep->setFormat(tr("Starting ..."));
+    ui->barStep->show();
 
     // Save in the background: encoding a large mosaic, or waiting for a sleeping
     // disk to spin up, would otherwise freeze the whole window (and digiKam).
@@ -783,6 +790,7 @@ void MainWindow::on_btnSave_clicked()
         QString error = watcher->result();
         watcher->deleteLater();
         toggleUI(true);
+        ui->barStep->hide();
 
         if (error.isEmpty())
         {

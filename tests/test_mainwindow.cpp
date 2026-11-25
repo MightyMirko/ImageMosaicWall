@@ -4,6 +4,7 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QLabel>
+#include <QProgressBar>
 #include <QSettings>
 #include <QSlider>
 #include <QSpinBox>
@@ -198,6 +199,22 @@ private slots:
         QCOMPARE(child<QComboBox>(window, "cbMatching")->currentIndex(), matchingDefault);
         QSpinBox *rows = child<QSpinBox>(window, "sbRows");
         QCOMPARE(rows->value(), rows->maximum());
+    }
+
+    // The step bar shows the step in progress and how far it has got.
+    void stepProgressShowsTheBar()
+    {
+        MainWindow window;
+        QProgressBar *bar = child<QProgressBar>(window, "barStep");
+
+        window.onStepProgress("Placing photos", 120, 2120);
+        QCOMPARE(bar->maximum(), 2120);
+        QCOMPARE(bar->value(), 120);
+        QVERIFY(bar->format().contains("Placing photos"));
+
+        // Progress reported past the total stays at the end of the bar.
+        window.onStepProgress("Placing photos", 3000, 2120);
+        QCOMPARE(bar->value(), 2120);
     }
 };
 

@@ -91,15 +91,29 @@ public:
     // Number of images taken from the cache by the last processMosaicImages().
     int cacheHits() const;
 
+    // Where the tiles of a mosaic too large to keep in memory are cached, one PNG per photo and
+    // size, so each photo is read once for all strips of the output. The tiles are lossless and
+    // the same as drawn. Empty means the user's cache directory. The files are kept between
+    // runs and reused while the photo is unchanged.
+    void setTileDirectory(const QString &directory);
+
+    // Reports the progress of the current step, from any thread: done of total items.
+    void reportStep(const QString &step, int done, int total);
+
 signals:
     void mosaicGenerated(const GridPoint);
     void cellProcessed(const int cellIndex);
     void imageProcessed(const QString image);
+    // A step of the work, e.g. "Analysing photos", with how many of its items are done.
+    void stepProgress(const QString &step, int done, int total);
 
 private:
     void calculateGridCellsMean(const QImage &, const QSize &, std::vector<QColor> &, int, int);
     void calculateImageMeanMap(const QList<QString>, const QHash<QString, TileCache::Entry> &cached);
     QImage loadTile(const QString &imagePath, QSize cellSize) const;
+    // Caches the tiles of the placed cells (see setTileDirectory); false if cancelled.
+    bool prepareTiles();
+    QString tileDirectory() const;
     bool render(QImage &target, const QRect &region, double scale, bool reportProgress);
     double calculateDistance(QColor rhs, QColor lhs) const;
     double calculateDistance(ColorLab rhs, ColorLab lhs) const;
@@ -157,6 +171,17 @@ private:
     QString m_cacheFile;
     std::atomic<int> m_cacheHits{0};
     QList<QPair<QString, TileCache::Entry>> m_newCacheEntries;
+    QString m_tileDirectory;
+    // A photo's cached tile: the file, and the size it was made at.
+    struct CachedTile
+    {
+        QString file;
+        QSize size;
+    };
+
+    // Photo path -> its cached tile, for the mosaic placed last; read-only while drawing.
+    QHash<QString, CachedTile> m_tileFiles;
+    std::atomic<int> m_progressDone{0};
 };
 
 /**

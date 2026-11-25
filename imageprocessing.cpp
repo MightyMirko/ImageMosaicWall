@@ -10,8 +10,10 @@
 #include <limits>
 #include <QDateTime>
 #include <QDebug>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFileInfo>
+#include <QStandardPaths>
 #include <QImage>
 #include <QImageReader>
 #include <QSet>
@@ -394,6 +396,7 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
 
     m_outputImage.reset();
     m_placedCells.clear();
+    m_tileFiles.clear();
 
     int gridWidth = gridSize.width();
     int numImages = int(m_imagePaths.size());
@@ -513,10 +516,13 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
 
     std::vector<std::vector<Candidate>> candidates(numCells);
 
+    std::atomic<int> matched{0};
     QtConcurrent::blockingMap(cellIndexes, [&](int cell) {
         if (!m_skipBackgroundProcess)
             candidates[cell] = bestMatches(CandidatesPerCell, cellKeys[cell], imageKeys, groupImages[cells[cell].group],
                                            [&](int image) { return distance(cell, image); });
+
+        reportStep(tr("Matching photos to cells"), ++matched, numCells);
     });
 
     if (m_skipBackgroundProcess)
@@ -762,6 +768,7 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
     for (int step = 0; step < int(order.size()); ++step)
     {
         int cell = order[step];
+        reportStep(tr("Placing photos"), step + 1, int(order.size()));
 
         // Already taken by an image that had to be placed somewhere.
         if (assigned[cell] >= 0)
@@ -830,7 +837,13 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
     m_tint = tint;
 
     if (qint64(outputSize.width()) * outputSize.height() * 4 > m_maxImageBytes)
+    {
+        // Drawn later in strips or parts, each reading the tiles again: cache them once now.
+        if (!prepareTiles())
+            return false;
+
         return !m_skipBackgroundProcess;
+    }
 
     auto image = std::make_shared<QImage>(outputSize, QImage::Format_ARGB32);
     if (image->isNull())
@@ -897,13 +910,14 @@ void ImageProcessing::calculateGridCellsMean(const QImage &baseImage,
 
         colorMap.at(g) = QColor(red, green, blue);
         emit cellProcessed(g);
+        reportStep(tr("Analysing the base image"), ++m_progressDone, int(colorMap.size()));
     }
 }
 
 void ImageProcessing::calculateImageMeanMap(const QList<QString> imageList,
                                             const QHash<QString, TileCache::Entry> &cached)
 {
-    std::function<void(const QString)> scale = [&](const QString imageFileName) {
+    auto analyse = [&](const QString imageFileName) {
         if (m_skipBackgroundProcess)
             return;
 
@@ -987,14 +1001,165 @@ void ImageProcessing::calculateImageMeanMap(const QList<QString> imageList,
         emit imageProcessed(imageFileName);
     };
 
+    std::atomic<int> analysed{0};
+    int total = int(imageList.size());
+    std::function<void(const QString)> scale = [&](const QString imageFileName) {
+        analyse(imageFileName);
+        reportStep(tr("Analysing photos"), ++analysed, total);
+    };
+
     QtConcurrent::map(imageList, scale).waitForFinished();
+}
+
+namespace
+{
+
+// Changing how tiles are cached needs a new version, so old files are not reused.
+const char *TileCacheVersion = "tile-v2";
+
+// Name of the cached tile of a photo at a size: from its path, size and modification time.
+QString tileFileName(const QString &imagePath, QSize size)
+{
+    QFileInfo info(imagePath);
+    QByteArray key = QStringLiteral("%1|%2|%3|%4|%5x%6")
+                         .arg(info.absoluteFilePath())
+                         .arg(info.size())
+                         .arg(info.lastModified().toMSecsSinceEpoch())
+                         .arg(TileCacheVersion)
+                         .arg(size.width())
+                         .arg(size.height())
+                         .toUtf8();
+
+    return QString::fromLatin1(QCryptographicHash::hash(key, QCryptographicHash::Sha256).toHex()) + ".png";
+}
+
+// A cached tile is only used at the size it was made for, so it holds the same pixels.
+bool tileMatches(const QString &file, QSize size)
+{
+    return QImageReader(file).size() == size;
+}
+
+} // namespace
+
+void ImageProcessing::setTileDirectory(const QString &directory)
+{
+    m_tileDirectory = directory;
+}
+
+QString ImageProcessing::tileDirectory() const
+{
+    if (!m_tileDirectory.isEmpty())
+        return m_tileDirectory;
+
+    return QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/imagemosaicwall/tiles";
+}
+
+void ImageProcessing::reportStep(const QString &step, int done, int total)
+{
+    emit stepProgress(step, done, total);
+}
+
+bool ImageProcessing::prepareTiles()
+{
+    m_tileFiles.clear();
+
+    // The size each photo is drawn at. A photo belongs to one group of cells, so one size.
+    QHash<int, QSize> sizes;
+    for (const PlacedCell &cell : m_placedCells)
+        sizes.insert(cell.image, cell.tileSize);
+
+    QDir dir(tileDirectory());
+    if (!dir.mkpath("."))
+        return !m_skipBackgroundProcess;
+
+    std::vector<int> images;
+    for (auto it = sizes.constBegin(); it != sizes.constEnd(); ++it)
+        images.push_back(it.key());
+
+    // One file per photo, so the photos are written in parallel without sharing a file.
+    std::vector<QString> files(images.size());
+    std::vector<int> positions(images.size());
+    std::iota(positions.begin(), positions.end(), 0);
+    std::atomic<int> prepared{0};
+    int total = int(images.size());
+
+    QtConcurrent::blockingMap(positions, [&](int position) {
+        if (!m_skipBackgroundProcess)
+        {
+            int image = images[position];
+            QString path = m_imagePaths[image];
+            QSize size = sizes.value(image);
+            QString file = dir.filePath(tileFileName(path, size));
+
+            if (tileMatches(file, size))
+            {
+                files[position] = file;
+            }
+            else
+            {
+                // The tile as it is drawn, so drawing from the cache changes no pixel.
+                QImage tile = loadTile(path, size);
+
+                // Under a temporary name first, so an interrupted run leaves no broken tile.
+                QString temporary = file + ".part";
+                bool written = !tile.isNull() && tile.save(temporary, "PNG");
+
+                if (written)
+                {
+                    QFile::remove(file);
+                    written = QFile::rename(temporary, file);
+                }
+
+                if (written)
+                    files[position] = file;
+                else
+                    QFile::remove(temporary);
+            }
+        }
+
+        reportStep(tr("Preparing tiles"), ++prepared, total);
+    });
+
+    if (m_skipBackgroundProcess)
+        return false;
+
+    // A photo that could not be read stays out of the cache; loadTile() reads it directly
+    // and then gets nothing either.
+    for (size_t position = 0; position < images.size(); ++position)
+        if (!files[position].isEmpty())
+            m_tileFiles.insert(m_imagePaths[images[position]], CachedTile{files[position], sizes.value(images[position])});
+
+    return true;
 }
 
 QImage ImageProcessing::loadTile(const QString &imagePath, QSize cellSize) const
 {
-    QImage image = extractThumbnail(imagePath, cellSize);
+    QImage image;
+
+    // A cached tile of this size holds the same pixels as drawn from the photo. A larger one
+    // is scaled down, e.g. for the preview, which saves reading the photo again.
+    auto cached = m_tileFiles.constFind(imagePath);
+    if (cached != m_tileFiles.constEnd() && cached->size.width() >= cellSize.width() &&
+        cached->size.height() >= cellSize.height())
+    {
+        if (cached->size == cellSize)
+        {
+            QImage tile(cached->file);
+            if (!tile.isNull())
+                return tile.convertToFormat(QImage::Format_ARGB32);
+        }
+        else
+        {
+            image = QImage(cached->file);
+        }
+    }
+
     if (image.isNull())
-        image = loadOrientedImage(imagePath, cellSize);
+    {
+        image = extractThumbnail(imagePath, cellSize);
+        if (image.isNull())
+            image = loadOrientedImage(imagePath, cellSize);
+    }
 
     // Fill the cell and crop the overflow evenly from both sides, keeping the center.
     QImage scaled = image.scaled(cellSize, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
@@ -1190,6 +1355,7 @@ void ImageProcessing::processGrid(const QImage &baseImage, QSize gridSize)
     QThreadPool pool;
 
     m_gridColorMap.resize(numCells);
+    m_progressDone = 0;
 
     // Converted once here for all threads; calculateGridCellsMean() reads ARGB32 scan lines.
     QImage argbImage = baseImage.convertToFormat(QImage::Format_ARGB32);
@@ -1419,6 +1585,10 @@ bool saveMosaicPart(ImageProcessing &processing, const QImage *whole, const Mosa
 
         // Strips of about 64 MB while drawing.
         int stripRows = qMax(1, int((qint64(64) << 20) / (qint64(part.region.width()) * 4)));
+        int strips = (part.region.height() + stripRows - 1) / stripRows;
+        int drawn = 0;
+
+        processing.reportStep(QObject::tr("Drawing mosaic"), 0, strips);
 
         for (int y = part.region.top(); y <= part.region.bottom(); y += stripRows)
         {
@@ -1430,6 +1600,8 @@ bool saveMosaicPart(ImageProcessing &processing, const QImage *whole, const Mosa
                 error = rows.isNull() ? QObject::tr("The mosaic could not be drawn.") : writer.errorString();
                 return false;
             }
+
+            processing.reportStep(QObject::tr("Drawing mosaic"), ++drawn, strips);
         }
 
         if (!writer.close())
@@ -1449,8 +1621,10 @@ bool saveMosaicPart(ImageProcessing &processing, const QImage *whole, const Mosa
 
     // The drawn images carry the print resolution already; setting it here would copy
     // the whole mosaic.
+    processing.reportStep(QObject::tr("Drawing mosaic"), 0, 1);
     QImage image = !whole ? processing.renderRegion(part.region)
                           : part.region == whole->rect() ? *whole : whole->copy(part.region);
+    processing.reportStep(QObject::tr("Drawing mosaic"), 1, 1);
 
     if (image.isNull())
     {

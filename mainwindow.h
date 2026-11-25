@@ -64,6 +64,7 @@ public slots:
   void onFolderDropped(QString folder);
   void onImageCellProgress();
   void onImageLoadPorgress();
+  void onStepProgress(const QString &step, int done, int total);
 
 private slots:
   void on_btnGenerate_clicked();

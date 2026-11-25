@@ -6,6 +6,7 @@
 #include <QLabel>
 #include <QProgressBar>
 #include <QSettings>
+#include "progressbutton.h"
 #include <QSlider>
 #include <QSpinBox>
 #include <QTemporaryDir>
@@ -199,6 +200,64 @@ private slots:
         QCOMPARE(child<QComboBox>(window, "cbMatching")->currentIndex(), matchingDefault);
         QSpinBox *rows = child<QSpinBox>(window, "sbRows");
         QCOMPARE(rows->value(), rows->maximum());
+    }
+
+    // Debug mode: the last base image, output size and tile folder come back on the next
+    // start. Without the environment variable nothing is reopened.
+    void debugSessionRestoresLastRun()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QString base = dir.filePath("base.png");
+        QImage image(300, 200, QImage::Format_RGB32);
+        image.fill(Qt::gray);
+        QVERIFY(image.save(base));
+
+        QString tiles = dir.filePath("tiles");
+        QVERIFY(QDir().mkpath(tiles));
+        for (int i = 0; i < 3; ++i)
+        {
+            QImage photo(40, 30, QImage::Format_RGB32);
+            photo.fill(QColor::fromHsv(i * 100, 200, 200));
+            QVERIFY(photo.save(QDir(tiles).filePath(QString("photo%1.png").arg(i))));
+        }
+
+        {
+            MainWindow window;
+            window.onImageDropped(base);
+            QThreadPool::globalInstance()->waitForDone();
+            QCoreApplication::processEvents();
+            child<QSpinBox>(window, "sbWidth")->setValue(1500);
+            child<QSpinBox>(window, "sbHeight")->setValue(1000);
+        }
+
+        // The tile folder last used, as the previous run left it.
+        {
+            QSettings settings(settingsPath(), QSettings::IniFormat);
+            settings.setValue("LastTileFolder", tiles);
+        }
+
+        qputenv("IMAGEMOSAICWALL_DEBUG_SESSION", "1");
+        {
+            MainWindow window;
+            QThreadPool::globalInstance()->waitForDone();
+            QVERIFY(QTest::qWaitFor([&] { return child<ProgressButton>(window, "btnSetImageFolder")->maxValue() == 3; },
+                                    10000));
+            QCOMPARE(child<QSpinBox>(window, "sbWidth")->value(), 1500);
+            QCOMPARE(child<QSpinBox>(window, "sbHeight")->value(), 1000);
+            QVERIFY(child<QLabel>(window, "lblOutputInfo")->text().contains("1500 x 1000 px"));
+        }
+
+        // Without the variable the window starts empty, as before.
+        qunsetenv("IMAGEMOSAICWALL_DEBUG_SESSION");
+        {
+            MainWindow window;
+            QThreadPool::globalInstance()->waitForDone();
+            QCoreApplication::processEvents();
+            QVERIFY(child<QSpinBox>(window, "sbWidth")->value() != 1500);
+            // The folder is not scanned: its 3 photos never become the count.
+            QVERIFY(child<ProgressButton>(window, "btnSetImageFolder")->maxValue() != 3);
+        }
     }
 
     // The step bar shows the step in progress and how far it has got.

@@ -11,6 +11,7 @@
 #include <QMessageBox>
 #include <QSettings>
 #include <QString>
+#include <QTimer>
 #include <iterator>
 #include "asyncdirectoryscanner.h"
 #include "progressbutton.h"
@@ -169,6 +170,11 @@ MainWindow::MainWindow(QWidget *parent)
 
     // After the connections, so the restored slider position also updates its label.
     loadSettings();
+
+    // Later than the constructor: the digiKam plugin hands over its image right after it
+    // is created, and that image wins over the remembered one.
+    if (qEnvironmentVariableIntValue("IMAGEMOSAICWALL_DEBUG_SESSION") != 0)
+        QTimer::singleShot(0, this, &MainWindow::restoreDebugSession);
 }
 
 MainWindow::~MainWindow()
@@ -237,6 +243,38 @@ void MainWindow::saveSettings() const
     settings.setValue("LastImageFolder", m_lastImageFolder);
     settings.setValue("LastTileFolder", m_lastTileFolder);
     settings.setValue("LastSaveFolder", m_lastSaveFolder);
+    settings.setValue("LastBaseImage", m_baseImagePath);
+    settings.setValue("OutputWidth", ui->sbWidth->value());
+    settings.setValue("OutputHeight", ui->sbHeight->value());
+}
+
+void MainWindow::restoreDebugSession()
+{
+    // An image the host or the user already chose is kept.
+    if (!m_baseImage.isNull())
+        return;
+
+    QSettings settings(SettingsFormat, QSettings::UserScope, SettingsOrganization, SettingsApplication);
+    QString image = settings.value("LastBaseImage").toString();
+    int width = settings.value("OutputWidth").toInt();
+    int height = settings.value("OutputHeight").toInt();
+
+    if (QFileInfo::exists(image))
+    {
+        loadImage(image);
+
+        // loadImage() sets the output to the image's size; put back the one used last time.
+        if (!m_baseImage.isNull() && width > 0 && height > 0)
+        {
+            ui->sbWidth->setValue(width);
+            ui->sbHeight->setValue(height);
+        }
+    }
+
+    // The tile folder is scanned again; its photos are analysed from the tile cache.
+    QString folder = m_lastTileFolder;
+    if (QDir(folder).exists())
+        loadImageFolder(folder);
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)

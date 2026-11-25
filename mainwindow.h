@@ -35,6 +35,9 @@ protected:
 private:
   void loadSettings();
   void saveSettings() const;
+  // Debug mode (IMAGEMOSAICWALL_DEBUG_SESSION=1): reopens the last base image, tile folder
+  // and output size, so a test run starts where the last one ended.
+  void restoreDebugSession();
   QString startFolder(const QString &lastFolder) const;
   void updateStatus();
   void toggleUI(bool enabled);

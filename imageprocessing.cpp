@@ -52,6 +52,24 @@ struct Candidate
     }
 };
 
+// Runs fn for every item on at most `threads` threads of a pool of its own, and waits for all of
+// them. (Qt 5's QtConcurrent has no pool argument for map and blockingMap.)
+template <typename T, typename F>
+void runLimited(const std::vector<T> &items, int threads, F fn)
+{
+    QThreadPool pool;
+    pool.setMaxThreadCount(threads);
+
+    QList<QFuture<void>> jobs;
+    jobs.reserve(int(items.size()));
+
+    for (const T &item : items)
+        jobs << QtConcurrent::run(&pool, [&fn, item]() { fn(item); });
+
+    for (QFuture<void> &job : jobs)
+        job.waitForFinished();
+}
+
 // How many of the best matching images are kept per cell. Only when all of them are
 // already used nearby is the whole list searched again.
 const int CandidatesPerCell = 64;
@@ -1031,9 +1049,8 @@ void ImageProcessing::calculateImageMeanMap(const QList<QString> imageList,
         reportStep(tr("Analysing photos"), ++analysed, total);
     };
 
-    QThreadPool pool;
-    pool.setMaxThreadCount(m_readThreads);
-    QtConcurrent::map(&pool, imageList, scale).waitForFinished();
+    std::vector<QString> files(imageList.begin(), imageList.end());
+    runLimited(files, m_readThreads, scale);
 }
 
 namespace
@@ -1303,10 +1320,7 @@ bool ImageProcessing::prepareTiles()
     std::atomic<int> prepared{0};
     int total = int(images.size());
 
-    QThreadPool pool;
-    pool.setMaxThreadCount(m_readThreads);
-
-    QtConcurrent::blockingMap(&pool, positions, [&](int position) {
+    runLimited(positions, m_readThreads, [&](int position) {
         if (!m_skipBackgroundProcess)
         {
             int image = images[position];

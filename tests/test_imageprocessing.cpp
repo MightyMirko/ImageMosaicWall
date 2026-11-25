@@ -1,13 +1,18 @@
 #include "imageprocessing.h"
+#include "tiffwriter.h"
 
 #include <QColor>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QPainter>
 #include <QSet>
 #include <QStandardPaths>
 #include <QImage>
 #include <QImageReader>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QThread>
@@ -42,6 +47,11 @@ bool similar(const QImage &a, const QImage &b, int tolerance)
                 return false;
 
     return true;
+}
+
+bool hasTiffReader()
+{
+    return QImageReader::supportedImageFormats().contains("tiff");
 }
 
 } // namespace
@@ -538,6 +548,367 @@ private slots:
         QCOMPARE(seen.size(), 9);
     }
 
+    // Issue #17: the output can be larger than the base image, which is only sampled.
+    void generateOutputLargerThanBase()
+    {
+        QImage base = solidImage(QSize(40, 30), QColor(200, 30, 30));
+        for (int y = 0; y < 30; ++y)
+            for (int x = 20; x < 40; ++x)
+                base.setPixelColor(x, y, QColor(30, 30, 200));
+
+        QList<QString> files{saveImage("big-red.png", solidImage(QSize(16, 12), QColor(200, 30, 30))),
+                             saveImage("big-blue.png", solidImage(QSize(16, 12), QColor(30, 30, 200)))};
+
+        ImageProcessing processing;
+        processing.processMosaicImages(files);
+        processing.processGrid(base, QSize(4, 3));
+        QVERIFY(processing.generateImage(QSize(400, 300), QSize(4, 3), 0));
+
+        const QImage *out = processing.getOutputImage();
+        QCOMPARE(out->size(), QSize(400, 300));
+        QVERIFY(similar(out->pixelColor(50, 150), QColor(200, 30, 30), 2));
+        QVERIFY(similar(out->pixelColor(350, 150), QColor(30, 30, 200), 2));
+        QCOMPARE(qAlpha(out->pixel(399, 299)), 255);
+    }
+
+    // Issue #18: any part of the mosaic can be drawn on its own, exactly as in the
+    // whole mosaic, so large ones can be saved piece by piece.
+    void renderRegionsMatchWholeMosaic()
+    {
+        QList<QString> files;
+        for (int i = 0; i < 8; ++i)
+            files << saveImage(QString("region%1.png").arg(i), solidImage(QSize(30, 20), QColor::fromHsv(i * 45, 200, 200)));
+
+        QImage base(150, 100, QImage::Format_RGB32);
+        for (int y = 0; y < base.height(); ++y)
+            for (int x = 0; x < base.width(); ++x)
+                base.setPixelColor(x, y, QColor::fromHsv((x * 2 + y) % 360, 200, 200));
+
+        for (Pattern pattern : {Pattern::Grid, Pattern::Parquet})
+        {
+            ImageProcessing processing;
+            processing.processMosaicImages(files);
+            processing.processGrid(base, QSize(7, 5));
+            QVERIFY(processing.generateImage(QSize(301, 203), QSize(7, 5), 1, 0, 0.25, Matching::ColorLayout, false,
+                                             pattern));
+            QImage whole = *processing.getOutputImage();
+
+            // Strips, and a region that starts and ends inside cells.
+            QImage stitched(whole.size(), QImage::Format_ARGB32);
+            QPainter painter(&stitched);
+            for (int y = 0; y < whole.height(); y += 37)
+            {
+                QRect strip(0, y, whole.width(), qMin(37, whole.height() - y));
+                painter.drawImage(strip.topLeft(), processing.renderRegion(strip));
+            }
+            painter.end();
+            QVERIFY(stitched == whole);
+
+            QRect inside(23, 17, 101, 88);
+            QVERIFY(processing.renderRegion(inside) == whole.copy(inside));
+
+            // A preview has the mosaic's aspect ratio and fits the size asked for.
+            QImage preview = processing.renderPreview(QSize(100, 100));
+            QCOMPARE(preview.size(), QSize(100, 67));
+            QCOMPARE(qAlpha(preview.pixel(99, 66)), 255);
+        }
+    }
+
+    // A mosaic larger than the memory limit is placed, but not drawn as a whole.
+    void largeMosaicIsNotKeptInMemory()
+    {
+        QList<QString> files{saveImage("limit-a.png", solidImage(QSize(30, 20), Qt::red)),
+                             saveImage("limit-b.png", solidImage(QSize(30, 20), Qt::blue))};
+        QImage base = solidImage(QSize(60, 40), Qt::red);
+
+        ImageProcessing processing;
+        processing.setMaxImageBytes(1000 * 1000 * 4 - 1);
+        processing.processMosaicImages(files);
+        processing.processGrid(base, QSize(6, 4));
+
+        QVERIFY(processing.generateImage(QSize(999, 999), QSize(6, 4), 0));
+        QVERIFY(processing.getOutputImage() != nullptr);
+
+        QVERIFY(processing.generateImage(QSize(1500, 1000), QSize(6, 4), 0));
+        QVERIFY(processing.getOutputImage() == nullptr);
+        QVERIFY(processing.hasMosaic());
+        QCOMPARE(processing.mosaicSize(), QSize(1500, 1000));
+        QVERIFY(similar(processing.renderRegion(QRect(1400, 900, 50, 50)).pixelColor(10, 10), Qt::red, 0));
+    }
+
+    void tiffWriter_data()
+    {
+        QTest::addColumn<bool>("bigTiff");
+        QTest::newRow("TIFF") << false;
+        QTest::newRow("BigTIFF") << true;
+    }
+
+    // Issue #18: large mosaics are saved as TIFF in strips, without the whole image in memory.
+    void tiffWriter()
+    {
+        QFETCH(bool, bigTiff);
+
+        QImage image(37, 23, QImage::Format_ARGB32);
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 0; x < image.width(); ++x)
+                image.setPixel(x, y, qRgb(x * 7, y * 11, (x * y) % 256));
+
+        QString path = m_dir.filePath(bigTiff ? "strips-big.tif" : "strips.tif");
+        TiffWriter writer;
+        writer.setForceBigTiff(bigTiff);
+        QVERIFY(writer.open(path, image.size(), 150));
+        QVERIFY(writer.writeRows(image.copy(0, 0, 37, 10)));
+        QVERIFY(writer.writeRows(image.copy(0, 10, 37, 1)));
+        QVERIFY(!writer.close());   // rows missing
+        QVERIFY(!writer.errorString().isEmpty());
+
+        QVERIFY(writer.open(path, image.size(), 150));
+        QCOMPARE(writer.isBigTiff(), bigTiff);
+        QVERIFY(writer.writeRows(image.copy(0, 0, 37, 10)));
+        QVERIFY(writer.writeRows(image.copy(0, 10, 37, 13)));
+        QVERIFY(!writer.writeRows(image.copy(0, 0, 37, 1)));   // one too many
+        QVERIFY(writer.open(path, image.size(), 150));
+        QVERIFY(writer.writeRows(image));
+        QVERIFY(writer.close());
+
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QByteArray header = file.read(4);
+        QCOMPARE(header, bigTiff ? QByteArray("II\x2b\x00", 4) : QByteArray("II\x2a\x00", 4));
+        QVERIFY(file.size() > qint64(37 * 23 * 3));
+        file.close();
+
+        if (!hasTiffReader())
+        {
+            // CI installs Qt's TIFF plugin, so the test must not be skipped there.
+            QVERIFY2(!qEnvironmentVariableIsSet("CI"), "Qt's TIFF plugin (qtimageformats) is missing");
+            QSKIP("Qt has no TIFF reader here to read the file back");
+        }
+
+        QImage read(path);
+        QCOMPARE(read.size(), image.size());
+        QVERIFY(similar(read.convertToFormat(QImage::Format_RGB32), image.convertToFormat(QImage::Format_RGB32), 0));
+        QCOMPARE(qRound(read.dotsPerMeterX() * 0.0254), 150);
+    }
+
+    // Issue #18: poster parts cover the mosaic and overlap only inside it.
+    void posterRegionsSplitTheMosaic()
+    {
+        QList<QRect> parts = posterRegions(QSize(100, 60), 3, 2, 5);
+        QCOMPARE(parts.size(), 6);
+        QCOMPARE(parts[0], QRect(QPoint(0, 0), QPoint(37, 34)));     // right and bottom overlap
+        QCOMPARE(parts[1], QRect(QPoint(28, 0), QPoint(70, 34)));    // both sides
+        QCOMPARE(parts[5], QRect(QPoint(61, 25), QPoint(99, 59)));   // ends at the mosaic's edge
+
+        QCOMPARE(posterRegions(QSize(100, 60), 1, 1, 5), QList<QRect>{QRect(0, 0, 100, 60)});
+    }
+
+    // Issue #18: parts are saved as they look in the mosaic, also when it isn't kept
+    // in memory; then PNG and JPEG are refused when a part is too large.
+    void saveMosaicParts()
+    {
+        if (!hasTiffReader())
+        {
+            // CI installs Qt's TIFF plugin, so the test must not be skipped there.
+            QVERIFY2(!qEnvironmentVariableIsSet("CI"), "Qt's TIFF plugin (qtimageformats) is missing");
+            QSKIP("Qt has no TIFF reader here to read the files back");
+        }
+
+        QList<QString> files;
+        for (int i = 0; i < 6; ++i)
+            files << saveImage(QString("save%1.png").arg(i), solidImage(QSize(30, 20), QColor::fromHsv(i * 60, 200, 200)));
+
+        QImage base(120, 80, QImage::Format_RGB32);
+        for (int y = 0; y < base.height(); ++y)
+            for (int x = 0; x < base.width(); ++x)
+                base.setPixelColor(x, y, QColor::fromHsv((x * 3) % 360, 200, 200));
+
+        ImageProcessing processing;
+        processing.setDotsPerInch(150);
+        processing.processMosaicImages(files);
+        processing.processGrid(base, QSize(6, 4));
+        QVERIFY(processing.generateImage(QSize(240, 160), QSize(6, 4), 1));
+        QImage whole = *processing.getOutputImage();
+        QCOMPARE(qRound(whole.dotsPerMeterX() * 0.0254), 150);
+
+        QList<QRect> regions = posterRegions(whole.size(), 2, 2, 3);
+        QString error;
+
+        for (const QString &suffix : {QString("png"), QString("tif")})
+        {
+            for (int i = 0; i < regions.size(); ++i)
+            {
+                QString name = m_dir.filePath(QString("part%1.%2").arg(i).arg(suffix));
+                QVERIFY2(saveMosaicPart(processing, &whole, {regions[i], name}, 150, error), qPrintable(error));
+
+                QImage saved(name);
+                QCOMPARE(saved.size(), regions[i].size());
+                QVERIFY(similar(saved.convertToFormat(QImage::Format_RGB32),
+                                whole.copy(regions[i]).convertToFormat(QImage::Format_RGB32), 0));
+                QCOMPARE(qRound(saved.dotsPerMeterX() * 0.0254), 150);
+            }
+        }
+
+        // Not in memory: TIFF is drawn in strips; PNG only if the part is small enough.
+        processing.setMaxImageBytes(130 * 90 * 4);   // a part, not the whole mosaic
+        QVERIFY(processing.generateImage(QSize(240, 160), QSize(6, 4), 1));
+        QVERIFY(processing.getOutputImage() == nullptr);
+
+        QString tiff = m_dir.filePath("large.tif");
+        QVERIFY2(saveMosaicPart(processing, nullptr, {QRect(0, 0, 240, 160), tiff}, 150, error), qPrintable(error));
+        QVERIFY(similar(QImage(tiff).convertToFormat(QImage::Format_RGB32), whole.convertToFormat(QImage::Format_RGB32), 0));
+
+        QVERIFY(!saveMosaicPart(processing, nullptr, {QRect(0, 0, 240, 160), m_dir.filePath("large.png")}, 150, error));
+        QVERIFY(!error.isEmpty());
+        QVERIFY(!QFile::exists(m_dir.filePath("large.png")));
+
+        QString small = m_dir.filePath("small.png");
+        QVERIFY2(saveMosaicPart(processing, nullptr, {regions[3], small}, 150, error), qPrintable(error));
+        QVERIFY(similar(QImage(small).convertToFormat(QImage::Format_RGB32),
+                        whole.copy(regions[3]).convertToFormat(QImage::Format_RGB32), 0));
+    }
+
+    // Issue #20: in the parquet pattern a slot holds one portrait photo or two landscape
+    // photos stacked, and the share of portrait slots follows the share of portraits.
+    void parquetPlacesPhotosByOrientation()
+    {
+        // Slots of 20 x 28 px, cells of 20 x 28 (portrait) or 20 x 14 (landscape).
+        QImage base = solidImage(QSize(160, 112), QColor(122, 122, 122));
+        QSize grid(8, 4);
+
+        QList<QColor> portraitColors{QColor(120, 120, 130)};
+        QList<QColor> landscapeColors{QColor(120, 130, 120), QColor(125, 125, 125), QColor(115, 120, 125),
+                                      QColor(120, 115, 120)};
+        QList<QString> files;
+        for (int i = 0; i < portraitColors.size(); ++i)
+            files << saveImage(QString("pq-portrait%1.png").arg(i), solidImage(QSize(20, 30), portraitColors[i]));
+        for (int i = 0; i < landscapeColors.size(); ++i)
+            files << saveImage(QString("pq-landscape%1.png").arg(i), solidImage(QSize(30, 20), landscapeColors[i]));
+
+        auto isOneOf = [](QRgb pixel, const QList<QColor> &colors) {
+            for (const QColor &c : colors)
+                if (similar(QColor(pixel), c, 2))
+                    return true;
+            return false;
+        };
+
+        for (Matching matching : {Matching::ColorLayout, Matching::MeanColor})
+        {
+            ImageProcessing processing;
+            processing.processMosaicImages(files);
+            processing.processGrid(base, grid);
+            QVERIFY(processing.generateImage(base.size(), grid, 0, 0, 0.0, matching, false, Pattern::Parquet));
+            const QImage *out = processing.getOutputImage();
+
+            std::vector<bool> portrait(grid.width() * grid.height());
+            for (int sy = 0; sy < grid.height(); ++sy)
+            {
+                for (int sx = 0; sx < grid.width(); ++sx)
+                {
+                    QRgb top = out->pixel(sx * 20 + 10, sy * 28 + 7);
+                    QRgb bottom = out->pixel(sx * 20 + 10, sy * 28 + 21);
+
+                    if (isOneOf(top, portraitColors))
+                    {
+                        QCOMPARE(bottom, top);   // one photo over the whole slot
+                        portrait[sy * grid.width() + sx] = true;
+                    }
+                    else
+                    {
+                        QVERIFY(isOneOf(top, landscapeColors));
+                        QVERIFY(isOneOf(bottom, landscapeColors));
+                        QVERIFY(top != bottom);   // two photos, even with variation 0
+                    }
+                }
+            }
+
+            // 1 portrait and 4 landscape photos: 2 * 1 / (4 + 2 * 1) of the 32 slots.
+            QCOMPARE(int(std::count(portrait.begin(), portrait.end(), true)), 11);
+
+            // In an even area portraits are spread out instead of filling whole rows.
+            for (int sy = 0; sy < grid.height(); ++sy)
+                for (int sx = 0; sx + 1 < grid.width(); ++sx)
+                    QVERIFY(!(portrait[sy * grid.width() + sx] && portrait[sy * grid.width() + sx + 1]));
+        }
+    }
+
+    // With photos of only one orientation, every slot takes that orientation.
+    void parquetWithOneOrientation()
+    {
+        QImage base = solidImage(QSize(80, 56), QColor(100, 100, 100));
+        QSize grid(4, 2);
+
+        auto portraitSlots = [&](const QList<QString> &files) {
+            ImageProcessing processing;
+            processing.processMosaicImages(files);
+            processing.processGrid(base, grid);
+            processing.generateImage(base.size(), grid, 0, 0, 0.0, Matching::MeanColor, false, Pattern::Parquet);
+            const QImage *out = processing.getOutputImage();
+
+            int count = 0;
+            for (int sy = 0; sy < grid.height(); ++sy)
+                for (int sx = 0; sx < grid.width(); ++sx)
+                    if (out->pixel(sx * 20 + 10, sy * 28 + 7) == out->pixel(sx * 20 + 10, sy * 28 + 21))
+                        ++count;
+            return count;
+        };
+
+        QList<QString> landscapes{saveImage("one-l1.png", solidImage(QSize(30, 20), QColor(100, 100, 110))),
+                                  saveImage("one-l2.png", solidImage(QSize(30, 20), QColor(110, 100, 100)))};
+        QList<QString> portraits{saveImage("one-p1.png", solidImage(QSize(20, 30), QColor(100, 100, 110))),
+                                 saveImage("one-p2.png", solidImage(QSize(20, 30), QColor(110, 100, 100)))};
+
+        QCOMPARE(portraitSlots(landscapes), 0);
+        QCOMPARE(portraitSlots(portraits), 8);
+    }
+
+    // Odd slot sizes: the stacked cells together fill the slot, nothing stays empty.
+    void parquetCoversOddSizes()
+    {
+        QImage base = solidImage(QSize(101, 143), QColor(90, 140, 60));
+        QList<QString> files{saveImage("odd-l.png", solidImage(QSize(30, 20), QColor(90, 140, 60))),
+                             saveImage("odd-l2.png", solidImage(QSize(30, 20), QColor(95, 135, 65))),
+                             saveImage("odd-p.png", solidImage(QSize(20, 30), QColor(90, 140, 60)))};
+
+        ImageProcessing processing;
+        processing.processMosaicImages(files);
+        processing.processGrid(base, QSize(7, 7));
+        QVERIFY(processing.generateImage(base.size(), QSize(7, 7), 1, 0, 0.0, Matching::ColorLayout, false,
+                                         Pattern::Parquet));
+        const QImage *out = processing.getOutputImage();
+
+        for (int y = 0; y < out->height(); ++y)
+            for (int x = 0; x < out->width(); ++x)
+                QVERIFY2(qAlpha(out->pixel(x, y)) == 255, qPrintable(QString("pixel %1,%2 is empty").arg(x).arg(y)));
+    }
+
+    // "Use every photo" also works with the parquet pattern.
+    void parquetUsesEveryImage()
+    {
+        QImage base = solidImage(QSize(200, 140), QColor(30, 30, 30));
+        QList<QString> files;
+        files << saveImage("pqe-dark-l.png", solidImage(QSize(30, 20), QColor(30, 30, 30)));
+        files << saveImage("pqe-dark-p.png", solidImage(QSize(20, 30), QColor(30, 30, 45)));
+        for (int i = 0; i < 3; ++i)
+        {
+            files << saveImage(QString("pqe-l%1.png").arg(i), solidImage(QSize(30, 20), QColor(200, 60 * i, 40)));
+            files << saveImage(QString("pqe-p%1.png").arg(i), solidImage(QSize(20, 30), QColor(40, 60 * i, 200)));
+        }
+
+        ImageProcessing processing;
+        processing.processMosaicImages(files);
+        processing.processGrid(base, QSize(10, 5));
+        QVERIFY(processing.generateImage(base.size(), QSize(10, 5), 0, 0, 0.0, Matching::MeanColor, true,
+                                         Pattern::Parquet));
+        const QImage *out = processing.getOutputImage();
+
+        QSet<QRgb> seen;
+        for (int y = 0; y < out->height(); y += 2)
+            for (int x = 0; x < out->width(); x += 2)
+                seen.insert(out->pixel(x, y));
+        QCOMPARE(seen.size(), 8);
+    }
+
     // Tint blends the cell's target color into the tile (issue #13).
     void generateTint()
     {
@@ -663,6 +1034,259 @@ private slots:
         QVERIFY(out != nullptr);
         QCOMPARE(out->size(), base.size());
         QVERIFY(similar(out->pixelColor(99, 69), Qt::yellow, 0));
+    }
+
+    // A mosaic too large to keep in memory is drawn from one cached tile per photo, and a
+    // second run reuses those files.
+    void tileCache()
+    {
+        QTemporaryDir tiles;
+        QVERIFY(tiles.isValid());
+
+        QList<QString> files;
+        for (int i = 0; i < 6; ++i)
+            files << saveImage(QString("cached%1.png").arg(i), solidImage(QSize(60, 40), QColor::fromHsv(i * 60, 200, 200)));
+
+        QImage base(120, 80, QImage::Format_RGB32);
+        for (int y = 0; y < base.height(); ++y)
+            for (int x = 0; x < base.width(); ++x)
+                base.setPixelColor(x, y, QColor::fromHsv((x * 3) % 360, 200, 200));
+
+        ImageProcessing reference;
+        reference.processMosaicImages(files);
+        reference.processGrid(base, QSize(6, 4));
+        QVERIFY(reference.generateImage(QSize(240, 160), QSize(6, 4), 1));
+        QImage expected = *reference.getOutputImage();
+
+        ImageProcessing processing;
+        processing.setTileDirectory(tiles.path());
+        processing.processMosaicImages(files);
+        processing.processGrid(base, QSize(6, 4));
+        processing.setMaxImageBytes(1);
+        QVERIFY(processing.generateImage(QSize(240, 160), QSize(6, 4), 1));
+        QVERIFY(processing.getOutputImage() == nullptr);
+
+        // One tile per photo that the mosaic uses.
+        QStringList cached = QDir(tiles.path()).entryList(QDir::Files, QDir::Name);
+        QVERIFY(cached.size() >= 1 && cached.size() <= 6);
+
+        // The tiles are PNG at the size they are drawn, so the strips match exactly.
+        QImage drawn = processing.renderRegion(QRect(QPoint(0, 0), QSize(240, 160)));
+        QVERIFY(similar(drawn, expected, 0));
+
+        // The preview is drawn at a smaller size, from the same tiles.
+        QImage preview = processing.renderPreview(QSize(120, 80));
+        QVERIFY(similar(preview, reference.renderPreview(QSize(120, 80)), 0));
+
+        QMap<QString, QDateTime> written;
+        for (const QString &name : cached)
+            written[name] = QFileInfo(tiles.filePath(name)).lastModified();
+
+        ImageProcessing again;
+        again.setTileDirectory(tiles.path());
+        again.processMosaicImages(files);
+        again.processGrid(base, QSize(6, 4));
+        again.setMaxImageBytes(1);
+        QVERIFY(again.generateImage(QSize(240, 160), QSize(6, 4), 1));
+
+        QCOMPARE(QDir(tiles.path()).entryList(QDir::Files, QDir::Name), cached);
+        for (const QString &name : cached)
+            QCOMPARE(QFileInfo(tiles.filePath(name)).lastModified(), written[name]);
+    }
+
+    // Which photo is in which tile, exported; a tile swapped for the next best photo; a photo
+    // excluded from the mosaic, also when it is created again. The output stays what a fresh
+    // drawing of the same tiles gives.
+    void tileEditing()
+    {
+        QList<QString> files;
+        for (int i = 0; i < 3; ++i)
+            files << saveImage(QString("edit%1.png").arg(i), solidImage(QSize(30, 20), QColor::fromHsv(i * 120, 200, 200)));
+
+        QImage base(120, 80, QImage::Format_RGB32);
+        base.fill(Qt::gray);
+        const QSize output(240, 160);
+        const QRect whole(QPoint(0, 0), output);
+
+        ImageProcessing processing;
+        processing.setCacheFile(m_dir.filePath("edit-cache.sqlite"));
+        processing.processMosaicImages(files);
+        processing.processGrid(base, QSize(6, 4));
+        QVERIFY(processing.generateImage(output, QSize(6, 4), 1));
+
+        // Every tile: its row and column, its place, and the photo; the places cover the output.
+        QList<ImageProcessing::TilePlacement> tiles = processing.placements();
+        QCOMPARE(tiles.size(), 24);
+        long area = 0;
+        for (int i = 0; i < tiles.size(); ++i)
+        {
+            QCOMPARE(tiles[i].row, i / 6);
+            QCOMPARE(tiles[i].column, i % 6);
+            QCOMPARE(tiles[i].rect.size(), QSize(40, 40));
+            QVERIFY(tiles[i].distance >= 0.0);
+            area += tiles[i].rect.width() * tiles[i].rect.height();
+        }
+        QCOMPARE(area, long(output.width()) * output.height());
+        QCOMPARE(processing.tileAt(QPoint(5, 5)), 0);
+        QCOMPARE(processing.tileAt(QPoint(239, 159)), 23);
+        QCOMPARE(processing.tileAt(QPoint(240, 0)), -1);
+
+        // Exported as CSV and as JSON, with a header or as an array.
+        QString error;
+        QString csv = m_dir.filePath("placements.csv");
+        QVERIFY2(writeTilePlacements(tiles, csv, error), qPrintable(error));
+        QFile csvFile(csv);
+        QVERIFY(csvFile.open(QIODevice::ReadOnly));
+        QStringList lines = QString::fromUtf8(csvFile.readAll()).split('\n', Qt::SkipEmptyParts);
+        QCOMPARE(lines.size(), 25);
+        QCOMPARE(lines[0], QString("row,column,x,y,width,height,path,distance"));
+        QVERIFY(lines[1].startsWith("1,1,0,0,40,40,"));
+
+        QString json = m_dir.filePath("placements.json");
+        QVERIFY2(writeTilePlacements(tiles, json, error), qPrintable(error));
+        QFile jsonFile(json);
+        QVERIFY(jsonFile.open(QIODevice::ReadOnly));
+        QJsonArray array = QJsonDocument::fromJson(jsonFile.readAll()).array();
+        QCOMPARE(array.size(), 24);
+        QCOMPARE(array[0].toObject().value("row").toInt(), 1);
+        QCOMPARE(array[0].toObject().value("column").toInt(), 1);
+        QCOMPARE(array[0].toObject().value("path").toString(), tiles[0].path);
+
+        // Swap: the tile shows another photo, and the output is drawn again to match.
+        QString before = tiles[0].path;
+        QVERIFY(processing.swapTile(0));
+        QVERIFY(processing.tilePlacement(0).path != before);
+        QVERIFY(*processing.getOutputImage() == processing.renderRegion(whole));
+
+        // Exclude a photo: no tile shows it any more, and the mosaic still covers the output.
+        QString excluded = processing.tilePlacement(5).path;
+        QCOMPARE(processing.excludePhoto(excluded), 0);
+        QCOMPARE(processing.excludedPhotos(), QStringList{excluded});
+        for (const ImageProcessing::TilePlacement &tile : processing.placements())
+            QVERIFY(tile.path != excluded);
+        QVERIFY(*processing.getOutputImage() == processing.renderRegion(whole));
+
+        // Created again, it stays out.
+        processing.processGrid(base, QSize(6, 4));
+        QVERIFY(processing.generateImage(output, QSize(6, 4), 1));
+        for (const ImageProcessing::TilePlacement &tile : processing.placements())
+            QVERIFY(tile.path != excluded);
+
+        // Without the mosaic in memory the same edits work on the tiles of the cache.
+        ImageProcessing large;
+        large.setCacheFile(m_dir.filePath("edit-cache-large.sqlite"));
+        large.setTileDirectory(m_dir.filePath("edit-tiles"));
+        large.processMosaicImages(files);
+        large.processGrid(base, QSize(6, 4));
+        large.setMaxImageBytes(1);
+        QVERIFY(large.generateImage(output, QSize(6, 4), 1));
+        QVERIFY(large.getOutputImage() == nullptr);
+        QVERIFY(large.swapTile(0));
+        QCOMPARE(large.excludePhoto(large.tilePlacement(1).path), 0);
+        QVERIFY(large.renderRegion(whole).size() == output);
+
+        // With every photo excluded there is no mosaic.
+        ImageProcessing none;
+        none.setCacheFile(m_dir.filePath("edit-cache-none.sqlite"));
+        none.processMosaicImages(files);
+        none.processGrid(base, QSize(6, 4));
+        for (const QString &file : files)
+            none.excludePhoto(file);
+        QVERIFY(!none.generateImage(output, QSize(6, 4), 1));
+    }
+
+    // The host's thumbnail is used for the analysis when it has one, so the photo isn't read.
+    void thumbnailProviderIsUsed()
+    {
+        // The file doesn't exist: its color can only come from the provider.
+        const QString missing = m_dir.filePath("only-in-the-host.jpg");
+        QList<QString> files{missing};
+
+        std::atomic<int> asked{0};
+        // Own cache files, so an analysis from one run isn't taken from the cache by the next.
+        ImageProcessing processing;
+        processing.setCacheFile(m_dir.filePath("provider-cache.sqlite"));
+        processing.setThumbnailProvider([&](const QString &path, QSize size) {
+            ++asked;
+            return path == missing ? solidImage(QSize(size), Qt::red) : QImage();
+        });
+        processing.processMosaicImages(files);
+
+        QCOMPARE(asked.load(), 1);
+        QCOMPARE(processing.getImageMeanMap().value(missing), QColor(Qt::red));
+
+        // A null thumbnail falls back to reading the photo; here that fails, so nothing is added.
+        ImageProcessing fallback;
+        fallback.setCacheFile(m_dir.filePath("fallback-cache.sqlite"));
+        fallback.setThumbnailProvider([](const QString &, QSize) { return QImage(); });
+        fallback.processMosaicImages(files);
+        QVERIFY(!fallback.getImageMeanMap().contains(missing));
+
+        // Few threads for the disk, at least one.
+        QCOMPARE(processing.readThreads(), 4);
+        processing.setReadThreads(0);
+        QCOMPARE(processing.readThreads(), 1);
+    }
+
+    // Every step reports its progress up to its total, from the photos to the drawing.
+    void stepProgress()
+    {
+        QTemporaryDir tiles;
+        QVERIFY(tiles.isValid());
+
+        QList<QString> files;
+        for (int i = 0; i < 6; ++i)
+            files << saveImage(QString("steps%1.png").arg(i), solidImage(QSize(60, 40), QColor::fromHsv(i * 60, 200, 200)));
+
+        QImage base(120, 80, QImage::Format_RGB32);
+        base.fill(Qt::gray);
+
+        struct Step
+        {
+            QString name;
+            int done;
+            int total;
+        };
+
+        QMutex mutex;
+        QList<Step> steps;
+
+        ImageProcessing processing;
+        processing.setTileDirectory(tiles.path());
+        connect(&processing, &ImageProcessing::stepProgress, &processing,
+                [&](const QString &name, int done, int total) {
+                    QMutexLocker lock(&mutex);
+                    steps << Step{name, done, total};
+                },
+                Qt::DirectConnection);
+
+        processing.processMosaicImages(files);
+        processing.processGrid(base, QSize(6, 4));
+        processing.setMaxImageBytes(1);
+        QVERIFY(processing.generateImage(QSize(240, 160), QSize(6, 4), 1));
+
+        QString error;
+        QVERIFY2(saveMosaicPart(processing, nullptr, {QRect(QPoint(0, 0), QSize(240, 160)), m_dir.filePath("steps.tif")},
+                                150, error),
+                 qPrintable(error));
+
+        for (const Step &step : steps)
+            QVERIFY(step.done >= 0 && step.done <= step.total);
+
+        const QStringList names = {"Analysing photos", "Analysing the base image", "Matching photos to cells",
+                                   "Placing photos", "Preparing tiles", "Drawing mosaic"};
+        for (const QString &name : names)
+        {
+            bool reached = false;
+            for (const Step &step : steps)
+                reached = reached || (step.name == name && step.done == step.total && step.total > 0);
+            QVERIFY2(reached, qPrintable(name));
+        }
+
+        // One tile per photo that the mosaic uses.
+        for (const Step &step : steps)
+            if (step.name == "Preparing tiles")
+                QVERIFY(step.total >= 1 && step.total <= 6);
     }
 };
 

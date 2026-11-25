@@ -110,9 +110,19 @@ void ImageViewer::setImage(const QImage &img, QSize resolution)
 
 void ImageViewer::setPreview(const QImage &img)
 {
-    m_preview->setPixmap(QPixmap::fromImage(img));
+    // The mosaic can be much larger than the base image, e.g. for prints. It is shown
+    // over the base image, at most this large, so the screen copy stays reasonable.
+    const int maxPreviewSide = 8192;
+    QImage preview = img;
+
+    if (qMax(img.width(), img.height()) > maxPreviewSide)
+        preview = img.scaled(maxPreviewSide, maxPreviewSide, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+
+    m_preview->setPixmap(QPixmap::fromImage(preview));
+    m_preview->setTransform(QTransform::fromScale(m_baseImage.width() / double(preview.width()),
+                                                  m_baseImage.height() / double(preview.height())));
     m_preview->setVisible(true);
-    fitToScene(img);
+    fitToScene(m_baseImage);
 }
 
 void ImageViewer::setGrid(QSize gridResolution)
@@ -200,6 +210,16 @@ void ImageViewer::resizeEvent(QResizeEvent *)
 void ImageViewer::mousePressEvent(QMouseEvent *event)
 {
     m_moveOffset = event->pos();
+    m_pressPos = event->pos();
+}
+
+void ImageViewer::mouseReleaseEvent(QMouseEvent *event)
+{
+    // Barely moved between press and release: a click, not the end of a pan.
+    if (event->button() == Qt::LeftButton && (event->pos() - m_pressPos).manhattanLength() < 4)
+        emit tileClicked(mapToScene(event->pos()));
+
+    QGraphicsView::mouseReleaseEvent(event);
 }
 
 void ImageViewer::mouseMoveEvent(QMouseEvent *event)

@@ -32,10 +32,14 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QVBoxLayout>
+#include <QSettings>
+#include <QStringList>
 
 // digiKam includes
 
 #include <dinfointerface.h>
+#include <thumbnailinfo.h>
+#include <thumbnailloadthread.h>
 #include <dmessagebox.h>
 
 // Local includes
@@ -50,6 +54,99 @@ void initImageMosaicWallResource()
 
 namespace DigikamGenericImageMosaicWallPlugin
 {
+
+namespace
+{
+
+// digiKam keeps the checked tags and albums of the chooser only when the chooser is destroyed,
+// and the plugin keeps it alive. So the selection is kept here instead, in the window's own
+// settings file, and can be used again without choosing it again.
+const char RememberedAlbumsKey[] = "RememberedAlbumIds";
+
+QSettings rememberedSettings()
+{
+    return QSettings(QSettings::IniFormat, QSettings::UserScope, "ImageMosaicWall", "ImageMosaicWall");
+}
+
+void rememberAlbums(const QList<int>& albums)
+{
+    QStringList ids;
+
+    for (int id : albums)
+    {
+        ids << QString::number(id);
+    }
+
+    rememberedSettings().setValue(QLatin1String(RememberedAlbumsKey), ids);
+}
+
+QList<int> rememberedAlbums()
+{
+    QList<int> albums;
+
+    for (const QString& id : rememberedSettings().value(QLatin1String(RememberedAlbumsKey)).toStringList())
+    {
+        bool ok = false;
+        int value = id.toInt(&ok);
+
+        if (ok)
+        {
+            albums << value;
+        }
+    }
+
+    return albums;
+}
+
+// digiKam's thumbnail of a photo, from its thumbnail database; digiKam makes it when there is none,
+// as it does when browsing. Called from the analysis threads, like digiKam's own face pipeline
+// does: a catcher per call, which gets the result directly from the loading thread.
+QImage digiKamThumbnail(const QString& path, QSize size)
+{
+    ThumbnailLoadThread* const thread = ThumbnailLoadThread::defaultThread();
+
+    if (!thread)
+    {
+        return QImage();
+    }
+
+    ThumbnailImageCatcher catcher(thread);
+    catcher.setActive(true);
+
+    thread->find(ThumbnailIdentifier(path), qMax(size.width(), size.height()));
+    catcher.enqueue();
+
+    const QList<QImage> images = catcher.waitForThumbnails();
+
+    return images.isEmpty() ? QImage() : images.first();
+}
+
+// The local files of the given tags and albums, each photo once.
+QList<QString> albumFiles(const DInfoInterface* iface, const QList<int>& albums)
+{
+    QList<QString> files;
+
+    if (albums.isEmpty())
+    {
+        return files;
+    }
+
+    const QList<QUrl> urls = iface->albumsItems(albums);
+
+    for (const QUrl& url : urls)
+    {
+        if (url.isLocalFile())
+        {
+            files << url.toLocalFile();
+        }
+    }
+
+    files.removeDuplicates();
+
+    return files;
+}
+
+} // namespace
 
 ImageMosaicWallPlugin::ImageMosaicWallPlugin(QObject* const parent)
     : DPluginGeneric(parent)
@@ -161,23 +258,25 @@ void ImageMosaicWallPlugin::slotImageMosaicWall()
                     }
 
                     // Albums, tags (including people), searches and labels; a photo can be
-                    // in several of the selected ones.
+                    // in several of the selected ones. The choice is remembered for next time.
+                    const QList<int> albums = iface->albumChooserItems();
+                    rememberAlbums(albums);
 
-                    const QList<QUrl> urls = iface->albumsItems(iface->albumChooserItems());
-
-                    for (const QUrl& url : urls)
-                    {
-                        if (url.isLocalFile())
-                        {
-                            files << url.toLocalFile();
-                        }
-                    }
-
-                    files.removeDuplicates();
-
-                    return files;
+                    return albumFiles(iface, albums);
                 }
             );
+
+            dlg->setRememberedTileSource(tr("Tiles from last selection"), [iface]()
+                {
+                    return albumFiles(iface, rememberedAlbums());
+                }
+            );
+        }
+
+        // Opt-in while it is tested: digiKam's thumbnails for the analysis of the photos.
+        if (qEnvironmentVariableIntValue("IMAGEMOSAICWALL_DIGIKAM_THUMBNAILS") != 0)
+        {
+            dlg->setPhotoThumbnails(digiKamThumbnail);
         }
 
         dlg->show();

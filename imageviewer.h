@@ -19,6 +19,8 @@ class ImageViewer : public QGraphicsView
 signals:
     void imageDropped(QString path);
     void folderDropped(QString path);
+    // A click on the image, in base image pixels (the scene's coordinates).
+    void tileClicked(QPointF scenePos);
 
 public slots:
     void setLoadingMosaicAt(const GridPoint);
@@ -34,6 +36,7 @@ public:
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseDoubleClickEvent(QMouseEvent*) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
     void setImage(const QImage& img);
     void setImage(const QImage& img, QSize resolution);
     void setPreview(const QImage& img);
@@ -54,6 +57,7 @@ private:
     Ui::ImageViewer *ui;
     QImage m_baseImage;
     QPoint m_moveOffset;
+    QPoint m_pressPos;
     QSize m_gridResolution;
     QGraphicsPixmapItem* m_image = nullptr;
     QGraphicsPixmapItem* m_preview = nullptr;

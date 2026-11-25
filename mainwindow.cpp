@@ -7,9 +7,19 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFutureWatcher>
+#include <QLocale>
 #include <QMessageBox>
 #include <QSettings>
 #include <QString>
+#include <QTimer>
+#include <QBoxLayout>
+#include <QClipboard>
+#include <QDesktopServices>
+#include <QGridLayout>
+#include <QGuiApplication>
+#include <QHBoxLayout>
+#include <QUrl>
+#include <QVBoxLayout>
 #include <iterator>
 #include "asyncdirectoryscanner.h"
 #include "progressbutton.h"
@@ -53,7 +63,37 @@ MainWindow::MainWindow(QWidget *parent)
     // With a fixed tile shape the rows follow from the columns.
     connect(ui->sbCols, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::applyTileShape);
     connect(ui->cbTileShape, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::applyTileShape);
-    connect(ui->btnSetResolution, SIGNAL(clicked(bool)), this, SLOT(onOutputResolutionChanged()));
+
+    // The output size in pixels and as printed are kept in step; the tile size shown
+    // below them follows the grid.
+    connect(ui->sbPrintWidth, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+            [this]() { setPixelsFromPrintSize(true); });
+    connect(ui->sbPrintHeight, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+            [this]() { setPixelsFromPrintSize(false); });
+    connect(ui->sbDpi, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int dpi) {
+        // A new resolution keeps the print size and changes the pixels; scaled from the
+        // pixels, as the shown print size is rounded.
+        double factor = double(dpi) / m_dpi;
+        m_dpi = dpi;
+        int width = qMax(1, qRound(ui->sbWidth->value() * factor));
+        int height = qMax(1, qRound(ui->sbHeight->value() * factor));
+
+        ui->sbWidth->blockSignals(true);
+        ui->sbHeight->blockSignals(true);
+        ui->sbWidth->setValue(width);
+        ui->sbHeight->setValue(height);
+        ui->sbWidth->blockSignals(false);
+        ui->sbHeight->blockSignals(false);
+
+        outputSizeChanged();
+    });
+    connect(ui->cbPrintUnit, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::updatePrintSize);
+    connect(ui->sbRows, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::updateOutputInfo);
+    connect(ui->sbCols, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::updateOutputInfo);
+    connect(ui->cbTileShape, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::updateOutputInfo);
+    connect(ui->sbPartColumns, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::updateOutputInfo);
+    connect(ui->sbPartRows, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::updateOutputInfo);
+    connect(ui->sbPartOverlap, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &MainWindow::updateOutputInfo);
 
     // The combo box entries are in the order of the RawFiles values.
     connect(ui->cbRawFiles, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
@@ -73,6 +113,11 @@ MainWindow::MainWindow(QWidget *parent)
     connect(&m_imageProcessing, &ImageProcessing::imageProcessed, this, &MainWindow::onImageLoadPorgress);
 
     connect(&m_imageProcessing, &ImageProcessing::cellProcessed, this, &MainWindow::onImageCellProgress);
+    connect(&m_imageProcessing, &ImageProcessing::stepProgress, this, &MainWindow::onStepProgress);
+    connect(&m_imageView, &ImageViewer::tileClicked, this, &MainWindow::onTileClicked);
+
+    setupTileInfo();
+    setupExport();
 
     connect(&m_imageView, &ImageViewer::folderDropped, this, &MainWindow::onFolderDropped);
     connect(&m_imageView, &ImageViewer::imageDropped, this, &MainWindow::onImageDropped);
@@ -92,6 +137,8 @@ MainWindow::MainWindow(QWidget *parent)
             scaleLockedImageSize(true);
             ui->sbHeight->blockSignals(false);
         }
+
+        outputSizeChanged();
     });
     connect(ui->sbHeight, QOverload<int>::of(&QSpinBox::valueChanged), [=]() {
         if (ui->btnLockRatio->isChecked())
@@ -100,6 +147,8 @@ MainWindow::MainWindow(QWidget *parent)
             scaleLockedImageSize(false);
             ui->sbWidth->blockSignals(false);
         }
+
+        outputSizeChanged();
     });
 
     connect(ui->slHistory, QOverload<int>::of(&QSlider::valueChanged), [=]() {
@@ -133,6 +182,11 @@ MainWindow::MainWindow(QWidget *parent)
 
     // After the connections, so the restored slider position also updates its label.
     loadSettings();
+
+    // Later than the constructor: the digiKam plugin hands over its image right after it
+    // is created, and that image wins over the remembered one.
+    if (qEnvironmentVariableIntValue("IMAGEMOSAICWALL_DEBUG_SESSION") != 0)
+        QTimer::singleShot(0, this, &MainWindow::restoreDebugSession);
 }
 
 MainWindow::~MainWindow()
@@ -164,6 +218,15 @@ void MainWindow::loadSettings()
     ui->sbRows->setValue(settings.value("GridRows", ui->sbRows->value()).toInt());
     ui->sbCols->setValue(settings.value("GridColumns", ui->sbCols->value()).toInt());
     comboIndex(ui->cbTileShape, "TileShape");
+    comboIndex(ui->cbPrintUnit, "PrintUnit");
+    ui->sbDpi->blockSignals(true);
+    ui->sbDpi->setValue(settings.value("Dpi", ui->sbDpi->value()).toInt());
+    ui->sbDpi->blockSignals(false);
+    m_dpi = ui->sbDpi->value();
+    ui->sbPartColumns->setValue(settings.value("PartColumns", ui->sbPartColumns->value()).toInt());
+    ui->sbPartRows->setValue(settings.value("PartRows", ui->sbPartRows->value()).toInt());
+    ui->sbPartOverlap->setValue(settings.value("PartOverlap", ui->sbPartOverlap->value()).toDouble());
+    updatePrintSize();
 
     m_lastImageFolder = settings.value("LastImageFolder").toString();
     m_lastTileFolder = settings.value("LastTileFolder").toString();
@@ -183,10 +246,61 @@ void MainWindow::saveSettings() const
     settings.setValue("GridRows", ui->sbRows->value());
     settings.setValue("GridColumns", ui->sbCols->value());
     settings.setValue("TileShape", ui->cbTileShape->currentIndex());
+    settings.setValue("PrintUnit", ui->cbPrintUnit->currentIndex());
+    settings.setValue("Dpi", ui->sbDpi->value());
+    settings.setValue("PartColumns", ui->sbPartColumns->value());
+    settings.setValue("PartRows", ui->sbPartRows->value());
+    settings.setValue("PartOverlap", ui->sbPartOverlap->value());
 
     settings.setValue("LastImageFolder", m_lastImageFolder);
     settings.setValue("LastTileFolder", m_lastTileFolder);
     settings.setValue("LastSaveFolder", m_lastSaveFolder);
+    // A window opened without an image must not overwrite the image and size of the last one.
+    if (!m_baseImagePath.isEmpty())
+    {
+        settings.setValue("LastBaseImage", m_baseImagePath);
+        settings.setValue("OutputWidth", ui->sbWidth->value());
+        settings.setValue("OutputHeight", ui->sbHeight->value());
+    }
+}
+
+void MainWindow::restoreDebugSession()
+{
+    QSettings settings(SettingsFormat, QSettings::UserScope, SettingsOrganization, SettingsApplication);
+    QString image = settings.value("LastBaseImage").toString();
+    int width = settings.value("OutputWidth").toInt();
+    int height = settings.value("OutputHeight").toInt();
+
+    // The host (digiKam) may have handed over its image already; then that one is kept.
+    if (m_baseImage.isNull() && QFileInfo::exists(image))
+        loadImage(image);
+
+    // The tags or albums chosen last time, else the tile folder used last time.
+    QList<QString> tiles = m_rememberedTileFiles ? m_rememberedTileFiles() : QList<QString>();
+    if (!tiles.isEmpty())
+    {
+        loadTileImages(tiles);
+    }
+    else
+    {
+        QString folder = m_lastTileFolder;
+        if (QDir(folder).exists())
+            loadImageFolder(folder);
+    }
+
+    // The output size as last time, when the image has the same proportions. loadImage() sets
+    // the output to the image's size, so this comes after it.
+    if (!m_baseImage.isNull() && width > 0 && height > 0)
+    {
+        double ratio = double(width) / height;
+        double imageRatio = double(m_baseImage.width()) / m_baseImage.height();
+
+        if (qAbs(ratio - imageRatio) < 0.01)
+        {
+            ui->sbWidth->setValue(width);
+            ui->sbHeight->setValue(height);
+        }
+    }
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
@@ -222,20 +336,20 @@ void MainWindow::updateStatus()
 
     ui->lblStatus->setText(QString("%1<br/>%2").arg(imageInfo).arg(folderInfo));
 
-    if (!m_baseImage.isNull())
-        ui->btnSetResolution->setEnabled(true);
-
     ui->btnCancel->hide();
 }
 
 void MainWindow::toggleUI(bool enabled)
 {
-    auto out = m_imageProcessing.getOutputImage();
     ui->btnGenerate->setEnabled(enabled && m_imageProcessing.isReady());
-    ui->btnSave->setEnabled(enabled && out != nullptr);
+    ui->btnSave->setEnabled(enabled && m_imageProcessing.hasMosaic());
+    if (m_btnExportList)
+        m_btnExportList->setEnabled(enabled && m_imageProcessing.hasMosaic());
+    if (m_tileInfo)
+        for (QPushButton *button : {m_btnSwapTile, m_btnExcludeTile, m_btnResetExclusions})
+            button->setEnabled(enabled);
 
     ui->btnLoad->setEnabled(enabled);
-    ui->btnSetResolution->setEnabled(enabled);
     ui->btnSetImageFolder->setEnabled(enabled);
     ui->cbRawFiles->setEnabled(enabled);
     ui->btnTilesFromHost->setEnabled(enabled);
@@ -245,6 +359,13 @@ void MainWindow::toggleUI(bool enabled)
     ui->cbTileShape->setEnabled(enabled);
     ui->sbHeight->setEnabled(enabled);
     ui->sbWidth->setEnabled(enabled);
+    ui->sbPrintWidth->setEnabled(enabled);
+    ui->sbPrintHeight->setEnabled(enabled);
+    ui->cbPrintUnit->setEnabled(enabled);
+    ui->sbDpi->setEnabled(enabled);
+    ui->sbPartColumns->setEnabled(enabled);
+    ui->sbPartRows->setEnabled(enabled);
+    ui->sbPartOverlap->setEnabled(enabled);
     ui->slHistory->setEnabled(enabled);
     ui->sbMaxUses->setEnabled(enabled);
     ui->cbEveryPhoto->setEnabled(enabled);
@@ -352,6 +473,283 @@ void MainWindow::setTileSource(const QString &text, std::function<QList<QString>
     ui->btnTilesFromHost->setVisible(bool(chooseFiles));
 }
 
+void MainWindow::setupTileInfo()
+{
+    m_tileInfo = new QFrame(&m_imageView);
+    m_tileInfo->setObjectName("tileInfo");
+    m_tileInfo->setFrameShape(QFrame::StyledPanel);
+    m_tileInfo->setAutoFillBackground(true);
+    m_tileInfo->setMaximumWidth(520);
+    m_tileInfo->hide();
+
+    m_tileInfoText = new QLabel(m_tileInfo);
+    m_tileInfoText->setObjectName("tileInfoText");
+    m_tileInfoText->setWordWrap(true);
+    m_tileInfoText->setTextInteractionFlags(Qt::TextSelectableByMouse);
+
+    m_btnSwapTile = new QPushButton(tr("Swap"), m_tileInfo);
+    m_btnExcludeTile = new QPushButton(tr("Exclude photo"), m_tileInfo);
+    m_btnCopyPath = new QPushButton(tr("Copy path"), m_tileInfo);
+    m_btnOpenPhoto = new QPushButton(tr("Open photo"), m_tileInfo);
+    m_btnResetExclusions = new QPushButton(tr("Reset excluded"), m_tileInfo);
+    m_btnCloseTile = new QPushButton(tr("Close"), m_tileInfo);
+
+    m_btnSwapTile->setObjectName("btnSwapTile");
+    m_btnExcludeTile->setObjectName("btnExcludeTile");
+    m_btnCopyPath->setObjectName("btnCopyPath");
+    m_btnOpenPhoto->setObjectName("btnOpenPhoto");
+    m_btnResetExclusions->setObjectName("btnResetExclusions");
+    m_btnCloseTile->setObjectName("btnCloseTile");
+
+    // Two rows of three, so every label fits.
+    auto *buttons = new QGridLayout;
+    buttons->addWidget(m_btnSwapTile, 0, 0);
+    buttons->addWidget(m_btnExcludeTile, 0, 1);
+    buttons->addWidget(m_btnResetExclusions, 0, 2);
+    buttons->addWidget(m_btnCopyPath, 1, 0);
+    buttons->addWidget(m_btnOpenPhoto, 1, 1);
+    buttons->addWidget(m_btnCloseTile, 1, 2);
+
+    auto *layout = new QVBoxLayout(m_tileInfo);
+    layout->addWidget(m_tileInfoText);
+    layout->addLayout(buttons);
+
+    connect(m_btnSwapTile, &QPushButton::clicked, this, &MainWindow::swapSelectedTile);
+    connect(m_btnExcludeTile, &QPushButton::clicked, this, &MainWindow::excludeSelectedTile);
+    connect(m_btnResetExclusions, &QPushButton::clicked, this, &MainWindow::resetExclusions);
+    connect(m_btnCopyPath, &QPushButton::clicked, this, [this]() {
+        if (m_selectedTile >= 0)
+            QGuiApplication::clipboard()->setText(m_imageProcessing.tilePlacement(m_selectedTile).path);
+    });
+    connect(m_btnOpenPhoto, &QPushButton::clicked, this, [this]() {
+        if (m_selectedTile >= 0)
+            QDesktopServices::openUrl(QUrl::fromLocalFile(m_imageProcessing.tilePlacement(m_selectedTile).path));
+    });
+    connect(m_btnCloseTile, &QPushButton::clicked, this, &MainWindow::hideTileInfo);
+}
+
+namespace
+{
+
+// The layout that holds the widget somewhere in its items, or null.
+QLayout *layoutHolding(QLayout *layout, QWidget *widget)
+{
+    for (int i = 0; i < layout->count(); ++i)
+    {
+        QLayoutItem *item = layout->itemAt(i);
+
+        if (item->widget() == widget)
+            return layout;
+
+        if (item->layout())
+            if (QLayout *found = layoutHolding(item->layout(), widget))
+                return found;
+    }
+
+    return nullptr;
+}
+
+} // namespace
+
+void MainWindow::setupExport()
+{
+    QWidget *save = ui->btnSave;
+    m_btnExportList = new QPushButton(tr("Export list ..."), save->parentWidget());
+    m_btnExportList->setObjectName("btnExportList");
+    m_btnExportList->setEnabled(false);
+    m_btnExportList->setToolTip(tr("Which photo is in which tile, as CSV or JSON"));
+    connect(m_btnExportList, &QPushButton::clicked, this, &MainWindow::exportTileList);
+
+    // Below the Save button, in its column, in the layout that holds the Save button.
+    for (QWidget *ancestor = save->parentWidget(); ancestor; ancestor = ancestor->parentWidget())
+    {
+        if (!ancestor->layout())
+            continue;
+
+        QLayout *holder = layoutHolding(ancestor->layout(), save);
+        if (!holder)
+            continue;
+
+        if (auto *grid = qobject_cast<QGridLayout *>(holder))
+        {
+            for (int i = 0; i < grid->count(); ++i)
+            {
+                if (grid->itemAt(i)->widget() != save)
+                    continue;
+
+                int row, column, rowSpan, columnSpan;
+                grid->getItemPosition(i, &row, &column, &rowSpan, &columnSpan);
+                grid->addWidget(m_btnExportList, row + rowSpan, column, 1, columnSpan);
+                return;
+            }
+        }
+        else if (auto *box = qobject_cast<QBoxLayout *>(holder))
+        {
+            box->addWidget(m_btnExportList);
+            return;
+        }
+
+        break;
+    }
+}
+
+void MainWindow::onTileClicked(QPointF scenePos)
+{
+    // The view shows the base image; the mosaic is larger by the output scale.
+    if (!m_imageProcessing.hasMosaic() || m_baseImage.isNull())
+    {
+        hideTileInfo();
+        return;
+    }
+
+    QSize output = m_imageProcessing.mosaicSize();
+    QPoint point(qFloor(scenePos.x() * output.width() / m_baseImage.width()),
+                 qFloor(scenePos.y() * output.height() / m_baseImage.height()));
+
+    m_selectedTile = m_imageProcessing.tileAt(point);
+
+    if (m_selectedTile < 0)
+        hideTileInfo();
+    else
+        showTileInfo();
+}
+
+void MainWindow::showTileInfo()
+{
+    if (m_selectedTile < 0 || !m_tileInfo)
+        return;
+
+    ImageProcessing::TilePlacement tile = m_imageProcessing.tilePlacement(m_selectedTile);
+    m_tileInfoText->setText(tr("Row %1, column %2: %3\nmatch distance %4, %5 excluded photo(s)")
+                                .arg(tile.row + 1)
+                                .arg(tile.column + 1)
+                                .arg(QFileInfo(tile.path).fileName())
+                                .arg(QString::number(tile.distance, 'f', 3))
+                                .arg(m_imageProcessing.excludedPhotos().size()));
+    m_tileInfoText->setToolTip(QDir::toNativeSeparators(tile.path));
+
+    m_tileInfo->adjustSize();
+    m_tileInfo->move(10, 10);
+    m_tileInfo->show();
+    m_tileInfo->raise();
+}
+
+void MainWindow::hideTileInfo()
+{
+    m_selectedTile = -1;
+
+    if (m_tileInfo)
+        m_tileInfo->hide();
+}
+
+void MainWindow::refreshMosaic()
+{
+    const QImage *out = m_imageProcessing.getOutputImage();
+
+    if (out)
+        m_imageView.setPreview(*out);
+    else if (!m_largePreview.isNull() || m_imageProcessing.hasMosaic())
+    {
+        m_largePreview = m_imageProcessing.renderPreview(QSize(8192, 8192));
+        if (!m_largePreview.isNull())
+            m_imageView.setPreview(m_largePreview);
+    }
+}
+
+void MainWindow::swapSelectedTile()
+{
+    if (m_selectedTile < 0)
+        return;
+
+    if (!m_imageProcessing.swapTile(m_selectedTile))
+    {
+        ui->lblStatus->setText(tr("No other photo of the same kind fits this tile."));
+        return;
+    }
+
+    refreshMosaic();
+    showTileInfo();
+}
+
+void MainWindow::excludeSelectedTile()
+{
+    if (m_selectedTile < 0)
+        return;
+
+    QString path = m_imageProcessing.tilePlacement(m_selectedTile).path;
+    int unchanged = m_imageProcessing.excludePhoto(path);
+    QString name = QFileInfo(path).fileName();
+
+    refreshMosaic();
+    showTileInfo();
+
+    ui->lblStatus->setText(unchanged == 0
+                               ? tr("%1 is left out of the mosaic, also when it is created again.").arg(name)
+                               : tr("%1 is left out, but %2 tiles could not get another photo.").arg(name).arg(unchanged));
+}
+
+void MainWindow::resetExclusions()
+{
+    m_imageProcessing.clearExcludedPhotos();
+    showTileInfo();
+    ui->lblStatus->setText(tr("The excluded photos are used again when the mosaic is created next."));
+}
+
+void MainWindow::exportTileList()
+{
+    if (!m_imageProcessing.hasMosaic())
+        return;
+
+    QFileInfo base(m_baseImagePath);
+    QString suggestion = m_baseImagePath.isEmpty() ? QStringLiteral("placement.csv")
+                                                   : base.dir().filePath(base.completeBaseName() + "_placement.csv");
+
+    QString filename = QFileDialog::getSaveFileName(this, tr("Export Tile List"), suggestion,
+                                                    tr("CSV (*.csv);;JSON (*.json)"));
+
+    if (filename.isEmpty())
+        return;
+
+    if (QFileInfo(filename).suffix().isEmpty())
+        filename += ".csv";
+
+    QList<ImageProcessing::TilePlacement> tiles = m_imageProcessing.placements();
+    QString error;
+
+    if (!writeTilePlacements(tiles, filename, error))
+    {
+        QMessageBox::warning(this, tr("Export Tile List"), tr("The list could not be written. %1").arg(error));
+        return;
+    }
+
+    ui->lblStatus->setText(tr("Exported %1 tiles to %2").arg(tiles.size()).arg(QDir::toNativeSeparators(filename)));
+}
+
+void MainWindow::setPhotoThumbnails(ImageProcessing::ThumbnailProvider provider)
+{
+    m_imageProcessing.setThumbnailProvider(std::move(provider));
+}
+
+void MainWindow::setRememberedTileSource(const QString &text, std::function<QList<QString>()> rememberedFiles)
+{
+    m_rememberedTileFiles = rememberedFiles;
+    ui->btnTilesLast->setText(text);
+    ui->btnTilesLast->setVisible(bool(rememberedFiles) && !text.isEmpty());
+}
+
+void MainWindow::on_btnTilesLast_clicked()
+{
+    QList<QString> files = m_rememberedTileFiles ? m_rememberedTileFiles() : QList<QString>();
+
+    if (files.isEmpty())
+    {
+        ui->lblStatus->setText(tr("No tags or albums are remembered yet. Choose them with Tiles from digiKam first."));
+        return;
+    }
+
+    loadTileImages(files);
+}
+
 void MainWindow::on_btnTilesFromHost_clicked()
 {
     if (!m_chooseTileFiles)
@@ -365,6 +763,10 @@ void MainWindow::on_btnTilesFromHost_clicked()
 
 void MainWindow::scaleLockedImageSize(bool senderIsWidth)
 {
+    // Nothing to keep before an image was loaded or the lock was set.
+    if (m_lockedResolution.isEmpty())
+        return;
+
     double n = qMax(m_lockedResolution.width(), m_lockedResolution.height());
     double d = qMin(m_lockedResolution.width(), m_lockedResolution.height());
     double ratio = n / d;
@@ -372,16 +774,16 @@ void MainWindow::scaleLockedImageSize(bool senderIsWidth)
     if (ui->sbWidth->value() >= ui->sbHeight->value())
     {
         if (senderIsWidth)
-            ui->sbHeight->setValue(ui->sbWidth->value() / ratio);
+            ui->sbHeight->setValue(qRound(ui->sbWidth->value() / ratio));
         else
-            ui->sbWidth->setValue(ui->sbHeight->value() * ratio);
+            ui->sbWidth->setValue(qRound(ui->sbHeight->value() * ratio));
     }
     else
     {
         if (senderIsWidth)
-            ui->sbHeight->setValue(ui->sbWidth->value() * ratio);
+            ui->sbHeight->setValue(qRound(ui->sbWidth->value() * ratio));
         else
-            ui->sbWidth->setValue(ui->sbHeight->value() / ratio);
+            ui->sbWidth->setValue(qRound(ui->sbHeight->value() / ratio));
     }
 }
 
@@ -399,7 +801,7 @@ void MainWindow::applyTileShape()
     // The spin box keeps the rows within its range, so with extreme image shapes the
     // tiles get close to, but not exactly, the chosen shape.
     if (aspect > 0.0 && !m_baseImage.isNull())
-        ui->sbRows->setValue(rowsForTileAspect(m_baseImage.size(), ui->sbCols->value(), aspect));
+        ui->sbRows->setValue(rowsForTileAspect(outputSize(), ui->sbCols->value(), aspect));
 }
 
 void MainWindow::on_btnLoad_clicked()
@@ -423,19 +825,121 @@ void MainWindow::onGridPropsValueChanged()
     ui->btnLoad->setRange(0, gridSize.width() * gridSize.height());
 }
 
-void MainWindow::onOutputResolutionChanged()
+QSize MainWindow::outputSize() const
 {
-    QSize res = QSize(ui->sbWidth->value(), ui->sbHeight->value());
+    return QSize(ui->sbWidth->value(), ui->sbHeight->value());
+}
 
-    if (res.width() <= 0 || res.height() <= 0 || m_baseImage.isNull())
-        return;
+double MainWindow::printUnitsPerInch() const
+{
+    return ui->cbPrintUnit->currentIndex() == 1 ? 1.0 : 2.54;
+}
 
-    m_baseImage = m_baseImage.scaled(res);
-    m_processedGridSize = QSize();
-    m_imageView.setImage(m_baseImage);
+void MainWindow::outputSizeChanged()
+{
+    // The cells' shape depends on the output's, so fixed tile shapes need other rows.
     applyTileShape();
-    onGridPropsValueChanged();
-    ui->btnSave->setEnabled(false);
+    updatePrintSize();
+}
+
+void MainWindow::updatePrintSize()
+{
+    QString suffix = ui->cbPrintUnit->currentIndex() == 1 ? tr(" in") : tr(" cm");
+    double unitsPerPixel = printUnitsPerInch() / ui->sbDpi->value();
+
+    for (QDoubleSpinBox *box : {ui->sbPrintWidth, ui->sbPrintHeight})
+    {
+        box->blockSignals(true);
+        box->setSuffix(suffix);
+        box->setDecimals(ui->cbPrintUnit->currentIndex() == 1 ? 2 : 1);
+    }
+
+    ui->sbPrintWidth->setValue(ui->sbWidth->value() * unitsPerPixel);
+    ui->sbPrintHeight->setValue(ui->sbHeight->value() * unitsPerPixel);
+
+    for (QDoubleSpinBox *box : {ui->sbPrintWidth, ui->sbPrintHeight})
+        box->blockSignals(false);
+
+    ui->sbPartOverlap->setSuffix(suffix);
+
+    updateOutputInfo();
+}
+
+void MainWindow::setPixelsFromPrintSize(bool fromWidth)
+{
+    double pixelsPerUnit = ui->sbDpi->value() / printUnitsPerInch();
+
+    // Read both first: setting the pixels updates the print fields.
+    int width = qRound(ui->sbPrintWidth->value() * pixelsPerUnit);
+    int height = qRound(ui->sbPrintHeight->value() * pixelsPerUnit);
+
+    // Setting one side lets the locked aspect ratio adjust the other; then all
+    // fields are updated from the pixels, so they never disagree after rounding.
+    if (fromWidth)
+        ui->sbWidth->setValue(width);
+    else
+        ui->sbHeight->setValue(height);
+
+    if (!ui->btnLockRatio->isChecked())
+    {
+        if (fromWidth)
+            ui->sbHeight->setValue(height);
+        else
+            ui->sbWidth->setValue(width);
+    }
+
+    updatePrintSize();
+}
+
+void MainWindow::updateOutputInfo()
+{
+    QSize size = outputSize();
+    QSize grid(ui->sbCols->value(), ui->sbRows->value());
+
+    if (size.isEmpty() || grid.isEmpty())
+    {
+        ui->lblOutputInfo->clear();
+        return;
+    }
+
+    // Uncompressed in memory while it is created, 4 bytes per pixel.
+    double megabytes = double(size.width()) * size.height() * 4 / (1024.0 * 1024.0);
+    QSize cell(qCeil(size.width() / double(grid.width())), qCeil(size.height() / double(grid.height())));
+    double unitsPerPixel = printUnitsPerInch() / ui->sbDpi->value();
+    QString unit = ui->cbPrintUnit->currentIndex() == 1 ? tr("in") : tr("cm");
+    int decimals = ui->cbPrintUnit->currentIndex() == 1 ? 2 : 1;
+    bool mixed = ui->cbTileShape->currentIndex() == MixedTileShape;
+
+    QString tile = mixed ? tr("Slot") : tr("Tile");
+    QString text = tr("%1: %2 x %3 px, %4 x %5 %6<br/>%7 x %8 px, %9 MB")
+                       .arg(tile)
+                       .arg(cell.width())
+                       .arg(cell.height())
+                       .arg(QLocale().toString(cell.width() * unitsPerPixel, 'f', decimals))
+                       .arg(QLocale().toString(cell.height() * unitsPerPixel, 'f', decimals))
+                       .arg(unit)
+                       .arg(size.width())
+                       .arg(size.height())
+                       .arg(qRound(megabytes));
+
+    QList<QRect> parts = posterParts(size);
+    if (parts.size() > 1)
+    {
+        // Middle parts overlap on both sides, so they are the largest.
+        QSize part;
+        for (const QRect &region : parts)
+            part = part.expandedTo(region.size());
+        text += tr("<br/>%1 parts of up to %2 x %3 %4")
+                    .arg(parts.size())
+                    .arg(QLocale().toString(part.width() * unitsPerPixel, 'f', decimals))
+                    .arg(QLocale().toString(part.height() * unitsPerPixel, 'f', decimals))
+                    .arg(unit);
+    }
+
+    if (megabytes * 1024 * 1024 > m_imageProcessing.maxImageBytes())
+        text += tr("<br/>Too large to keep in memory: saved as TIFF in strips, or in parts.");
+
+    ui->lblOutputInfo->setText(text);
 }
 
 void MainWindow::onMosaicCreationFinished()
@@ -445,9 +949,12 @@ void MainWindow::onMosaicCreationFinished()
     auto out = m_imageProcessing.getOutputImage();
     if (out != nullptr)
         m_imageView.setPreview(*out);
+    else if (!m_largePreview.isNull())
+        m_imageView.setPreview(m_largePreview);
 
     toggleUI(true);
     ui->btnCancel->hide();
+    ui->barStep->hide();
     delete m_mosaicGeneration;
 }
 
@@ -464,23 +971,20 @@ void MainWindow::onFolderDropped(QString folder)
 void MainWindow::onImageCellProgress()
 {
     ui->btnLoad->increment();
-
-    auto current = ui->btnLoad->currentValue();
-    auto max = ui->btnLoad->maxValue();
-    auto message = tr("%1 of %2 cells processed").arg(current).arg(max);
-
-    ui->lblStatus->setText(message);
 }
 
 void MainWindow::onImageLoadPorgress()
 {
     ui->btnSetImageFolder->increment();
+}
 
-    auto current = ui->btnSetImageFolder->currentValue();
-    auto max = ui->btnSetImageFolder->maxValue();
-    auto message = tr("%1 of %2 images processed").arg(current).arg(max);
-
-    ui->lblStatus->setText(message);
+void MainWindow::onStepProgress(const QString &step, int done, int total)
+{
+    // The bar shows the step in progress, with its count, e.g. "Placing photos: 120 of 2120".
+    ui->barStep->setRange(0, qMax(1, total));
+    ui->barStep->setValue(qBound(0, done, qMax(1, total)));
+    ui->barStep->setFormat(tr("%1: %v of %m (%p%)").arg(step));
+    ui->barStep->show();
 }
 
 void MainWindow::on_btnGenerate_clicked()
@@ -488,49 +992,81 @@ void MainWindow::on_btnGenerate_clicked()
     toggleUI(false);
     m_imageProcessing.processCanceled(false);
     m_imageView.clearPreview();
+    hideTileInfo();
     ui->btnCancel->show();
+    ui->barStep->setRange(0, 1);
+    ui->barStep->setValue(0);
+    ui->barStep->setFormat(tr("Starting ..."));
+    ui->barStep->show();
 
     // Read all widget state here on the GUI thread; the generation thread must not touch the UI.
     QSize gridSize = QSize(ui->sbCols->value(), ui->sbRows->value());
     int history = m_variations[ui->slHistory->value()];
     int maxUses = ui->sbMaxUses->value();
     bool everyPhoto = ui->cbEveryPhoto->isChecked();
+    Pattern pattern = ui->cbTileShape->currentIndex() == MixedTileShape ? Pattern::Parquet : Pattern::Grid;
     double tint = ui->sbTint->value() / 100.0;
     // The combo box entries are in the order of the Matching values.
     Matching matching = static_cast<Matching>(ui->cbMatching->currentIndex());
     bool gridChanged = gridSize != m_processedGridSize;
     QImage baseImage = m_baseImage;
+    QSize output = outputSize();
     m_processedGridSize = gridSize;
     saveSettings();
+
+    m_imageProcessing.setDotsPerInch(ui->sbDpi->value());
+    m_largePreview = QImage();
 
     m_mosaicGeneration = QThread::create([=] {
         if (gridChanged)
             m_imageProcessing.processGrid(baseImage, gridSize);
 
-        m_imageProcessing.generateImage(baseImage.size(), gridSize, history, maxUses, tint, matching, everyPhoto);
+        m_imageProcessing.generateImage(output, gridSize, history, maxUses, tint, matching, everyPhoto,
+                                        pattern);
+
+        // Too large to keep in memory: only a smaller copy is drawn to show it.
+        if (!m_imageProcessing.getOutputImage() && m_imageProcessing.hasMosaic())
+            m_largePreview = m_imageProcessing.renderPreview(QSize(8192, 8192));
     });
     connect(m_mosaicGeneration, SIGNAL(finished()), this, SLOT(onMosaicCreationFinished()));
     m_mosaicGeneration->start();
 }
 
+QList<QRect> MainWindow::posterParts(QSize size) const
+{
+    int overlap = qRound(ui->sbPartOverlap->value() / printUnitsPerInch() * ui->sbDpi->value());
+    return posterRegions(size, ui->sbPartColumns->value(), ui->sbPartRows->value(), overlap);
+}
+
 void MainWindow::on_btnSave_clicked()
 {
-    const QImage *out = m_imageProcessing.getOutputImage();
-    if (out == nullptr)
+    if (!m_imageProcessing.hasMosaic())
         return;
+
+    const QImage *out = m_imageProcessing.getOutputImage();
+    QSize size = m_imageProcessing.mosaicSize();
+    QList<QRect> regions = posterParts(size);
+    bool inParts = regions.size() > 1;
 
     QString pngFilter = tr("PNG (*.png)");
     QString jpegFilter = tr("JPEG (*.jpg)");
-    QString selectedFilter = pngFilter;
+    QString tiffFilter = tr("TIFF (*.tif)");
+
+    // Larger than the memory allows for PNG and JPEG: TIFF is suggested.
+    bool tooLarge = !out;
+    QString selectedFilter = tooLarge ? tiffFilter : pngFilter;
 
     // Suggested next to the base image, or in the folder the last mosaic was saved to.
     bool hasSaveFolder = !m_lastSaveFolder.isEmpty() && QDir(m_lastSaveFolder).exists();
     QString suggestion = suggestedMosaicFileName(m_baseImagePath, hasSaveFolder ? m_lastSaveFolder : QString());
+    if (tooLarge)
+        suggestion = QFileInfo(suggestion).dir().filePath(QFileInfo(suggestion).completeBaseName() + ".tif");
 
     QString filename = QFileDialog::getSaveFileName(this,
-                                                    tr("Save Mosaic Image"),
+                                                    inParts ? tr("Save Mosaic in %1 Parts").arg(regions.size())
+                                                            : tr("Save Mosaic Image"),
                                                     suggestion,
-                                                    pngFilter + ";;" + jpegFilter,
+                                                    pngFilter + ";;" + jpegFilter + ";;" + tiffFilter,
                                                     &selectedFilter);
 
     if (filename.isEmpty())
@@ -538,48 +1074,99 @@ void MainWindow::on_btnSave_clicked()
 
     // QImage::save() picks the format from the suffix and fails without one.
     if (QFileInfo(filename).suffix().isEmpty())
-        filename += (selectedFilter == jpegFilter) ? ".jpg" : ".png";
+        filename += (selectedFilter == jpegFilter) ? ".jpg" : (selectedFilter == tiffFilter) ? ".tif" : ".png";
 
-    // Overwriting the base image would replace the original photo and lose its metadata.
-    if (!m_baseImagePath.isEmpty() && QFileInfo(filename) == QFileInfo(m_baseImagePath))
+    // Parts are numbered by row and column: name_r1c2.png.
+    QList<MosaicPart> parts;
+    QFileInfo info(filename);
+    for (int i = 0; i < regions.size(); ++i)
     {
-        QMessageBox::warning(this,
-                             tr("Save Mosaic Image"),
-                             tr("The mosaic can't be saved over its base image. Please choose another file name."));
-        return;
+        QString name = !inParts ? filename
+                                : info.dir().filePath(QString("%1_r%2c%3.%4")
+                                                          .arg(info.completeBaseName())
+                                                          .arg(i / ui->sbPartColumns->value() + 1)
+                                                          .arg(i % ui->sbPartColumns->value() + 1)
+                                                          .arg(info.suffix()));
+        parts.append({regions[i], name});
     }
 
-    m_lastSaveFolder = QFileInfo(filename).absolutePath();
+    // Overwriting the base image would replace the original photo and lose its metadata.
+    for (const MosaicPart &part : parts)
+    {
+        if (!m_baseImagePath.isEmpty() && QFileInfo(part.fileName) == QFileInfo(m_baseImagePath))
+        {
+            QMessageBox::warning(this,
+                                 tr("Save Mosaic Image"),
+                                 tr("The mosaic can't be saved over its base image. Please choose another file name."));
+            return;
+        }
+    }
+
+    // The dialog only asked about the name typed, not the parts' names.
+    if (inParts)
+    {
+        int existing = 0;
+        for (const MosaicPart &part : parts)
+            existing += QFileInfo::exists(part.fileName) ? 1 : 0;
+
+        if (existing > 0 &&
+            QMessageBox::question(this,
+                                  tr("Save Mosaic Image"),
+                                  tr("%1 of the %2 parts already exist. Replace them?").arg(existing).arg(parts.size())) !=
+                QMessageBox::Yes)
+            return;
+    }
+
+    m_lastSaveFolder = info.absolutePath();
+    QString nativeName = QDir::toNativeSeparators(filename);
+    int dotsPerInch = ui->sbDpi->value();
+
+    toggleUI(false);
+    m_imageProcessing.processCanceled(false);
+    ui->lblStatus->setText(tr("Saving %1 ...").arg(nativeName));
+    ui->barStep->setRange(0, 1);
+    ui->barStep->setValue(0);
+    ui->barStep->setFormat(tr("Starting ..."));
+    ui->barStep->show();
 
     // Save in the background: encoding a large mosaic, or waiting for a sleeping
     // disk to spin up, would otherwise freeze the whole window (and digiKam).
-    QImage image = *out;
-    QString nativeName = QDir::toNativeSeparators(filename);
+    auto watcher = new QFutureWatcher<QString>(this);
 
-    toggleUI(false);
-    ui->lblStatus->setText(tr("Saving %1 ...").arg(nativeName));
-
-    auto watcher = new QFutureWatcher<bool>(this);
-
-    connect(watcher, &QFutureWatcher<bool>::finished, this, [=]() {
-        bool saved = watcher->result();
+    connect(watcher, &QFutureWatcher<QString>::finished, this, [=]() {
+        QString error = watcher->result();
         watcher->deleteLater();
         toggleUI(true);
+        ui->barStep->hide();
 
-        if (saved)
+        if (error.isEmpty())
         {
-            ui->lblStatus->setText(tr("Saved to %1").arg(nativeName));
+            ui->lblStatus->setText(inParts ? tr("Saved %1 parts as %2").arg(parts.size()).arg(nativeName)
+                                           : tr("Saved to %1").arg(nativeName));
         }
         else
         {
             ui->lblStatus->clear();
-            QMessageBox::warning(this,
-                                 tr("Save Mosaic Image"),
-                                 tr("The mosaic could not be saved to %1.").arg(nativeName));
+            QMessageBox::warning(this, tr("Save Mosaic Image"), error);
         }
     });
 
-    watcher->setFuture(QtConcurrent::run([image, filename]() { return image.save(filename); }));
+    watcher->setFuture(QtConcurrent::run([this, out, parts, dotsPerInch]() {
+        for (int i = 0; i < parts.size(); ++i)
+        {
+            if (parts.size() > 1)
+                QMetaObject::invokeMethod(this, [this, i, n = parts.size()]() {
+                    ui->lblStatus->setText(tr("Saving part %1 of %2 ...").arg(i + 1).arg(n));
+                });
+
+            QString error;
+            if (!saveMosaicPart(m_imageProcessing, out, parts[i], dotsPerInch, error))
+                return tr("The mosaic could not be saved to %1.").arg(QDir::toNativeSeparators(parts[i].fileName)) +
+                       " " + error;
+        }
+
+        return QString();
+    }));
 }
 
 void MainWindow::on_btnSetImageFolder_clicked()

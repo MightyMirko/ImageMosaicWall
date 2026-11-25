@@ -1,13 +1,23 @@
 #include "imageprocessing.h"
+#include "tiffwriter.h"
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <numeric>
+#include <queue>
 #include <limits>
 #include <QDateTime>
 #include <QDebug>
+#include <QCryptographicHash>
+#include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QDir>
 #include <QFileInfo>
+#include <QStandardPaths>
 #include <QImage>
 #include <QImageReader>
 #include <QSet>
@@ -42,13 +52,28 @@ struct Candidate
     }
 };
 
+// Runs fn for every item on at most `threads` threads of a pool of its own, and waits for all of
+// them. (Qt 5's QtConcurrent has no pool argument for map and blockingMap.)
+template <typename T, typename F>
+void runLimited(const std::vector<T> &items, int threads, F fn)
+{
+    QThreadPool pool;
+    pool.setMaxThreadCount(threads);
+
+    QList<QFuture<void>> jobs;
+    jobs.reserve(int(items.size()));
+
+    for (const T &item : items)
+        jobs << QtConcurrent::run(&pool, [&fn, item]() { fn(item); });
+
+    for (QFuture<void> &job : jobs)
+        job.waitForFinished();
+}
+
 // How many of the best matching images are kept per cell. Only when all of them are
 // already used nearby is the whole list searched again.
 const int CandidatesPerCell = 64;
 
-// Cells and the visible part of tiles are compared as a grid of this many colors per side.
-const int CellLayoutSize = 4;
-using LabLayout = std::array<ColorLab, CellLayoutSize * CellLayoutSize>;
 
 TileLayout computeTileLayout(const QImage &image)
 {
@@ -279,6 +304,41 @@ std::vector<Candidate> bestMatches(int count, const ColorLab &query, const std::
     return best;
 }
 
+// One cell of the mosaic: where it is drawn in the output and which part of the base
+// image it shows, the slot of the grid it belongs to, and the group of images it takes.
+struct MosaicCell
+{
+    QRect out;
+    QRect base;
+    int slot;
+    int group;
+};
+
+// The mean color of the part of rect inside image (ARGB32); black if there is none.
+QColor meanColor(const QImage &image, const QRect &rect)
+{
+    QRect inside = rect.intersected(image.rect());
+    qint64 r = 0, g = 0, b = 0, count = 0;
+
+    for (int y = inside.top(); y <= inside.bottom(); ++y)
+    {
+        const QRgb *line = reinterpret_cast<const QRgb *>(image.constScanLine(y));
+
+        for (int x = inside.left(); x <= inside.right(); ++x)
+        {
+            r += qRed(line[x]);
+            g += qGreen(line[x]);
+            b += qBlue(line[x]);
+            ++count;
+        }
+    }
+
+    if (count == 0)
+        return QColor(Qt::black);
+
+    return QColor(int(r / count), int(g / count), int(b / count));
+}
+
 // Item indexes sorted by the lightness of their keys.
 std::vector<int> sortedByLightness(const std::vector<ColorLab> &keys)
 {
@@ -341,67 +401,111 @@ void ImageProcessing::processMosaicImages(const QList<QString> &imageList)
 }
 
 bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int history, int maxUses, double tint,
-                                    Matching matching, bool useEveryImage)
+                                    Matching matching, bool useEveryImage, Pattern pattern)
 {
     if (!isReady())
         return false;
 
-    int numCells = gridSize.width() * gridSize.height();
+    int numSlots = gridSize.width() * gridSize.height();
 
     // The cell colors must have been calculated for this exact grid, otherwise
     // generateImage() reads past the end of m_gridColorMap.
-    if (m_gridColorMap.size() != static_cast<size_t>(numCells))
+    if (m_gridColorMap.size() != static_cast<size_t>(numSlots))
         return false;
 
-    m_outputSize = outputSize;
+    m_outputImage.reset();
+    m_placedCells.clear();
+    m_cellFeatures.clear();
+    m_tileFiles.clear();
 
-    m_outputImage = std::unique_ptr<QImage>(new QImage(outputSize, QImage::Format_ARGB32));
-    m_outputImage->fill(Qt::transparent);
-
-    // Worker threads write their cells straight into the pixel buffer. Calling
-    // QImage::setPixel() from several threads is not safe, it detaches each time.
-    m_outputBits = m_outputImage->bits();
-    m_outputBytesPerLine = m_outputImage->bytesPerLine();
-
-    QSize cellSize(qCeil(outputSize.width() / double(gridSize.width())),
-                   qCeil(outputSize.height() / double(gridSize.height())));
     int gridWidth = gridSize.width();
     int numImages = int(m_imagePaths.size());
+    bool parquet = pattern == Pattern::Parquet;
 
-    std::vector<int> cells(numCells);
-    std::iota(cells.begin(), cells.end(), 0);
+    // The grid divides the output into slots. A grid slot is one cell; a parquet slot
+    // can be one portrait cell or two landscape cells, so all three are set up here
+    // and the slot's cells are chosen once the matches are known.
+
+    QSize slotSize(qCeil(outputSize.width() / double(gridWidth)), qCeil(outputSize.height() / double(gridSize.height())));
+    QSize baseSlot(qCeil(m_baseImage.width() / double(gridWidth)), qCeil(m_baseImage.height() / double(gridSize.height())));
+
+    // Images can only go into cells of their group: all images in the grid, landscape
+    // images (group 0) and portrait images (group 1) in the parquet pattern.
+    std::vector<int> imageGroup(numImages, 0);
+    if (parquet)
+        for (int i = 0; i < numImages; ++i)
+            imageGroup[i] = m_imageAspects[i] < 1.0f ? 1 : 0;
+
+    // The size tiles of a group are loaded at; cells at the edge of a stacked pair
+    // can be a pixel smaller and are cropped when drawn.
+    QSize groupTileSize[2] = {slotSize, slotSize};
+    if (parquet)
+        groupTileSize[0] = QSize(slotSize.width(), qCeil(slotSize.height() / 2.0));
+
+    std::vector<MosaicCell> cells;
+    cells.reserve(parquet ? 3 * numSlots : numSlots);
+
+    for (int slot = 0; slot < numSlots; ++slot)
+    {
+        QPoint outOrigin((slot % gridWidth) * slotSize.width(), (slot / gridWidth) * slotSize.height());
+        QPoint baseOrigin((slot % gridWidth) * baseSlot.width(), (slot / gridWidth) * baseSlot.height());
+
+        if (!parquet)
+        {
+            cells.push_back({QRect(outOrigin, slotSize), QRect(baseOrigin, baseSlot), slot, 0});
+            continue;
+        }
+
+        int outTop = slotSize.height() / 2;
+        int baseTop = baseSlot.height() / 2;
+
+        cells.push_back({QRect(outOrigin, slotSize), QRect(baseOrigin, baseSlot), slot, 1});
+        cells.push_back({QRect(outOrigin, QSize(slotSize.width(), outTop)),
+                         QRect(baseOrigin, QSize(baseSlot.width(), baseTop)), slot, 0});
+        cells.push_back({QRect(outOrigin + QPoint(0, outTop), QSize(slotSize.width(), slotSize.height() - outTop)),
+                         QRect(baseOrigin + QPoint(0, baseTop), QSize(baseSlot.width(), baseSlot.height() - baseTop)),
+                         slot, 0});
+    }
+
+    int numCells = int(cells.size());
+    std::vector<int> cellIndexes(numCells);
+    std::iota(cellIndexes.begin(), cellIndexes.end(), 0);
 
     // 1. In parallel: the best matching images for every cell.
 
+    // The target color of each cell; for the grid the one calculated by processGrid().
+    std::vector<QColor> cellColors(numCells);
+    QtConcurrent::blockingMap(cellIndexes, [&](int cell) {
+        cellColors[cell] = parquet ? meanColor(m_baseImage, cells[cell].base) : m_gridColorMap[cells[cell].slot];
+    });
+
     std::vector<ColorLab> cellLabs(numCells);
     for (int cell = 0; cell < numCells; ++cell)
-    {
-        QColor color = m_gridColorMap[cell];
-        cellLabs[cell] = toLab(color);
-    }
+        cellLabs[cell] = toLab(cellColors[cell]);
 
     // With Matching::ColorLayout, cells and tiles are compared as 4 x 4 grids of colors,
     // so a tile that is dark on the left goes where the base image is dark on the left.
-    // The tiles' grids are taken from the part that is visible at this cell size.
+    // The tiles' grids are taken from the part that is visible in the cells of their group.
     bool layoutMatching = matching == Matching::ColorLayout && !m_baseImage.isNull();
     std::vector<LabLayout> cellLayouts;
     std::vector<LabLayout> tileLayouts;
 
     if (layoutMatching)
     {
-        QSize baseCell(qCeil(m_baseImage.width() / double(gridWidth)), qCeil(m_baseImage.height() / double(gridSize.height())));
         cellLayouts.resize(numCells);
 
-        QtConcurrent::blockingMap(cells, [&](int cell) {
-            QRect rect(QPoint((cell % gridWidth) * baseCell.width(), (cell / gridWidth) * baseCell.height()), baseCell);
-            cellLayouts[cell] = cellLayout(m_baseImage, rect, m_gridColorMap[cell]);
+        QtConcurrent::blockingMap(cellIndexes, [&](int cell) {
+            cellLayouts[cell] = cellLayout(m_baseImage, cells[cell].base, cellColors[cell]);
         });
 
-        float cellAspect = float(cellSize.width()) / cellSize.height();
         tileLayouts.resize(numImages);
 
         for (int i = 0; i < numImages; ++i)
-            tileLayouts[i] = visibleTileLayout(m_imageLayouts[i], m_imageAspects[i], cellAspect);
+        {
+            QSize tileSize = groupTileSize[imageGroup[i]];
+            tileLayouts[i] = visibleTileLayout(m_imageLayouts[i], m_imageAspects[i],
+                                               float(tileSize.width()) / tileSize.height());
+        }
     }
 
     auto distance = [&](int cell, int image) {
@@ -426,24 +530,147 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
     for (int i = 0; i < numImages; ++i)
         imageKeys[i] = layoutMatching ? averageColor(tileLayouts[i]) : m_imageLabs[i];
 
-    std::vector<int> imagesByLightness = sortedByLightness(imageKeys);
+    std::vector<int> groupImages[2];
+    for (int image : sortedByLightness(imageKeys))
+        if (!isExcluded(image))
+            groupImages[imageGroup[image]].push_back(image);
+
     std::vector<std::vector<Candidate>> candidates(numCells);
 
-    QtConcurrent::blockingMap(cells, [&](int cell) {
+    std::atomic<int> matched{0};
+    QtConcurrent::blockingMap(cellIndexes, [&](int cell) {
         if (!m_skipBackgroundProcess)
-            candidates[cell] = bestMatches(CandidatesPerCell, cellKeys[cell], imageKeys, imagesByLightness,
+            candidates[cell] = bestMatches(CandidatesPerCell, cellKeys[cell], imageKeys, groupImages[cells[cell].group],
                                            [&](int image) { return distance(cell, image); });
+
+        reportStep(tr("Matching photos to cells"), ++matched, numCells);
     });
 
     if (m_skipBackgroundProcess)
         return false;
+
+    // Parquet: choose for every slot between one portrait and two landscape cells.
+    // How many slots get a portrait follows the share of portrait images, so images of
+    // both orientations are used about equally often; which ones, follows where a
+    // portrait image fits best compared to the two landscape images it replaces.
+    std::vector<bool> active(numCells, true);
+
+    if (parquet)
+    {
+        double portraits = double(groupImages[1].size());
+        double landscapes = double(groupImages[0].size());
+        int portraitSlots = qRound(numSlots * 2.0 * portraits / (landscapes + 2.0 * portraits));
+
+        auto bestDistance = [&](int cell) {
+            return candidates[cell].empty() ? std::numeric_limits<double>::max() : candidates[cell].front().distance;
+        };
+
+        std::vector<double> advantage(numSlots);
+        for (int slot = 0; slot < numSlots; ++slot)
+        {
+            double portrait = bestDistance(3 * slot);
+            double pair = (bestDistance(3 * slot + 1) + bestDistance(3 * slot + 2)) / 2.0;
+            advantage[slot] = pair - portrait;
+        }
+
+        // Slots are chosen one after another, best advantage first. A slot loses a little
+        // for every neighbour that already holds a portrait, so in even areas portraits
+        // and pairs alternate like parquet instead of filling whole rows; clear
+        // differences in the base image still decide.
+        std::vector<double> finite;
+        for (double a : advantage)
+            if (std::isfinite(a))
+                finite.push_back(a);
+
+        double penalty = 1.0;
+        if (finite.size() >= 4)
+        {
+            std::sort(finite.begin(), finite.end());
+            double spread = finite[finite.size() * 3 / 4] - finite[finite.size() / 4];
+            if (spread > 0.0)
+                penalty = spread / 2.0;
+        }
+
+        int gridHeight = gridSize.height();
+        std::vector<int> portraitNeighbours(numSlots, 0);
+        std::vector<bool> portrait(numSlots, false);
+
+        // Highest score first; equal scores in slot order.
+        struct Entry
+        {
+            double score;
+            int slot;
+            int neighbours;   // portraitNeighbours[slot] when the score was computed
+            bool operator<(const Entry &other) const
+            {
+                return score < other.score || (score == other.score && slot > other.slot);
+            }
+        };
+
+        std::priority_queue<Entry> queue;
+        for (int slot = 0; slot < numSlots; ++slot)
+            queue.push({advantage[slot], slot, 0});
+
+        for (int chosen = 0; chosen < portraitSlots && !queue.empty();)
+        {
+            Entry entry = queue.top();
+            queue.pop();
+
+            // Scores only go down, so an outdated entry is recomputed and queued again.
+            if (entry.neighbours != portraitNeighbours[entry.slot])
+            {
+                int n = portraitNeighbours[entry.slot];
+                queue.push({advantage[entry.slot] - penalty * n, entry.slot, n});
+                continue;
+            }
+
+            portrait[entry.slot] = true;
+            ++chosen;
+
+            int x = entry.slot % gridWidth;
+            int y = entry.slot / gridWidth;
+            if (x > 0)
+                ++portraitNeighbours[entry.slot - 1];
+            if (x < gridWidth - 1)
+                ++portraitNeighbours[entry.slot + 1];
+            if (y > 0)
+                ++portraitNeighbours[entry.slot - gridWidth];
+            if (y < gridHeight - 1)
+                ++portraitNeighbours[entry.slot + gridWidth];
+        }
+
+        for (int slot = 0; slot < numSlots; ++slot)
+        {
+            active[3 * slot] = portrait[slot];
+            active[3 * slot + 1] = !portrait[slot];
+            active[3 * slot + 2] = !portrait[slot];
+        }
+    }
+
+    // The cells of every slot that are used, for the neighbourhood of variation.
+    std::vector<std::vector<int>> slotCells(numSlots);
+    std::vector<int> activeCells;
+
+    for (int cell = 0; cell < numCells; ++cell)
+    {
+        if (!active[cell])
+            continue;
+
+        slotCells[cells[cell].slot].push_back(cell);
+        activeCells.push_back(cell);
+    }
+
+    // Every placed cell needs a photo of its group; without one there is no mosaic.
+    for (int cell : activeCells)
+        if (groupImages[cells[cell].group].empty())
+            return false;
 
     // 2. One cell after the other, so every choice sees all choices made before it.
     // Cells whose best match is worst go first: they depend most on their few good
     // images, which easier cells would otherwise take. No randomness is involved, so
     // the same settings always give the same mosaic, whatever the number of threads.
 
-    std::vector<int> order = cells;
+    std::vector<int> order = activeCells;
     std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
         return candidates[a].front().distance > candidates[b].front().distance;
     });
@@ -452,12 +679,20 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
     std::vector<int> blockedAt(numImages, -1);   // step at which an image was last seen nearby
     std::vector<int> uses(numImages, 0);
 
+    // Images that go into cells of a group, per group.
+    std::vector<int> groupCells[2];
+    for (int cell : activeCells)
+        groupCells[cells[cell].group].push_back(cell);
+
     // With more images than cells, not every image can be used; each one is then
     // used at most once instead.
-    if (useEveryImage && numImages > numCells)
+    for (int group = 0; group < 2; ++group)
     {
-        useEveryImage = false;
-        maxUses = 1;
+        if (useEveryImage && groupImages[group].size() > groupCells[group].size())
+        {
+            useEveryImage = false;
+            maxUses = 1;
+        }
     }
 
     auto underLimit = [&](int image) { return maxUses <= 0 || uses[image] < maxUses; };
@@ -467,15 +702,22 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
     // end up with leftovers, and they take few cells away from the others.
     if (useEveryImage)
     {
-        std::vector<int> images(numImages);
-        std::iota(images.begin(), images.end(), 0);
+        std::vector<int> images;
+        for (int image = 0; image < numImages; ++image)
+            if (!isExcluded(image))
+                images.push_back(image);
+
         std::vector<std::vector<Candidate>> bestCells(numImages);   // Candidate::image is a cell here
 
-        std::vector<int> cellsByLightness = sortedByLightness(cellKeys);
+        std::vector<int> cellsByLightness[2];
+        for (int cell : sortedByLightness(cellKeys))
+            if (active[cell])
+                cellsByLightness[cells[cell].group].push_back(cell);
 
         QtConcurrent::blockingMap(images, [&](int image) {
             if (!m_skipBackgroundProcess)
-                bestCells[image] = bestMatches(CandidatesPerCell, imageKeys[image], cellKeys, cellsByLightness,
+                bestCells[image] = bestMatches(CandidatesPerCell, imageKeys[image], cellKeys,
+                                               cellsByLightness[imageGroup[image]],
                                                [&](int cell) { return distance(cell, image); });
         });
 
@@ -500,12 +742,12 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
             }
 
             // All close cells are taken: the best free one of the whole grid. There is
-            // one, since there are at least as many cells as images.
+            // one, since there are at least as many cells as images in every group.
             if (chosen < 0)
             {
                 double best = std::numeric_limits<double>::max();
 
-                for (int cell = 0; cell < numCells; ++cell)
+                for (int cell : groupCells[imageGroup[image]])
                 {
                     if (assigned[cell] >= 0)
                         continue;
@@ -525,12 +767,18 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
         }
     }
 
-    // Best image in the whole list that passes the given test, or -1.
+    // The images of each group in index order, so ties resolve to the lowest index.
+    std::vector<int> groupImagesByIndex[2];
+    for (int image = 0; image < numImages; ++image)
+        if (!isExcluded(image))
+            groupImagesByIndex[imageGroup[image]].push_back(image);
+
+    // Best image of the cell's group that passes the given test, or -1.
     auto bestOf = [&](int cell, auto &&allowed) {
         int chosen = -1;
         double best = std::numeric_limits<double>::max();
 
-        for (int i = 0; i < numImages; ++i)
+        for (int i : groupImagesByIndex[cells[cell].group])
         {
             if (!allowed(i))
                 continue;
@@ -547,25 +795,29 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
         return chosen;
     };
 
-    for (int step = 0; step < numCells; ++step)
+    for (int step = 0; step < int(order.size()); ++step)
     {
         int cell = order[step];
+        reportStep(tr("Placing photos"), step + 1, int(order.size()));
 
         // Already taken by an image that had to be placed somewhere.
         if (assigned[cell] >= 0)
             continue;
 
-        int cx = cell % gridWidth;
-        int cy = cell / gridWidth;
+        int cx = cells[cell].slot % gridWidth;
+        int cy = cells[cell].slot / gridWidth;
 
         // Images already used within the variation radius are not allowed here.
         for (int y = qMax(0, cy - history); y <= qMin(gridSize.height() - 1, cy + history); ++y)
         {
             for (int x = qMax(0, cx - history); x <= qMin(gridWidth - 1, cx + history); ++x)
             {
-                int used = assigned[y * gridWidth + x];
-                if (used >= 0)
-                    blockedAt[used] = step;
+                for (int neighbour : slotCells[y * gridWidth + x])
+                {
+                    int used = assigned[neighbour];
+                    if (used >= 0)
+                        blockedAt[used] = step;
+                }
             }
         }
 
@@ -601,28 +853,44 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
         ++uses[chosen];
     }
 
-    // 3. In parallel: load and crop each used image once, and draw it into all its
-    // cells. Cells never overlap, so images can be drawn at the same time.
+    // 3. Keep where every image goes, and draw the mosaic unless it is too large to be
+    // kept in memory as a whole; it is then drawn in parts when it is saved.
 
-    std::vector<std::vector<int>> cellsOfImage(numImages);
-    for (int cell = 0; cell < numCells; ++cell)
-        cellsOfImage[assigned[cell]].push_back(cell);
+    m_imageGroups = imageGroup;
+    m_layoutMatching = layoutMatching;
+    m_tileLayouts = layoutMatching ? tileLayouts : std::vector<LabLayout>();
+    m_gridSize = gridSize;
 
-    std::vector<int> usedImages;
-    for (int image = 0; image < numImages; ++image)
-        if (!cellsOfImage[image].empty())
-            usedImages.push_back(image);
+    for (int cell : activeCells)
+    {
+        int slot = cells[cell].slot;
+        m_placedCells.push_back({cells[cell].out, assigned[cell], groupTileSize[imageGroup[assigned[cell]]],
+                                 cellColors[cell], GridPoint(slot % gridWidth, slot / gridWidth),
+                                 distance(cell, assigned[cell])});
+        m_cellFeatures.push_back({cellLabs[cell], layoutMatching ? cellLayouts[cell] : LabLayout(),
+                                  cells[cell].group});
+    }
 
-    QtConcurrent::blockingMap(usedImages, [&](int image) {
-        if (m_skipBackgroundProcess)
-            return;
+    m_outputSize = outputSize;
+    m_tint = tint;
 
-        QImage tile = loadTile(m_imagePaths[image], cellSize);
+    if (qint64(outputSize.width()) * outputSize.height() * 4 > m_maxImageBytes)
+    {
+        // Drawn later in strips or parts, each reading the tiles again: cache them once now.
+        if (!prepareTiles())
+            return false;
 
-        for (int cell : cellsOfImage[image])
-            drawCell(cell, tile, cellSize, gridWidth, tint);
-    });
+        return !m_skipBackgroundProcess;
+    }
 
+    auto image = std::make_shared<QImage>(outputSize, QImage::Format_ARGB32);
+    if (image->isNull())
+        return false;
+
+    if (!render(*image, QRect(QPoint(0, 0), outputSize), 1.0, true))
+        return false;
+
+    m_outputImage = image;
     return !m_skipBackgroundProcess;
 }
 
@@ -680,13 +948,14 @@ void ImageProcessing::calculateGridCellsMean(const QImage &baseImage,
 
         colorMap.at(g) = QColor(red, green, blue);
         emit cellProcessed(g);
+        reportStep(tr("Analysing the base image"), ++m_progressDone, int(colorMap.size()));
     }
 }
 
 void ImageProcessing::calculateImageMeanMap(const QList<QString> imageList,
                                             const QHash<QString, TileCache::Entry> &cached)
 {
-    std::function<void(const QString)> scale = [&](const QString imageFileName) {
+    auto analyse = [&](const QString imageFileName) {
         if (m_skipBackgroundProcess)
             return;
 
@@ -713,7 +982,10 @@ void ImageProcessing::calculateImageMeanMap(const QList<QString> imageList,
             return;
         }
 
-        QImage image = extractThumbnail(imageFileName, QSize(128, 128));
+        // The host's thumbnail first: then the photo itself isn't read at all.
+        QImage image = m_thumbnailProvider ? m_thumbnailProvider(imageFileName, QSize(128, 128)) : QImage();
+        if (image.isNull())
+            image = extractThumbnail(imageFileName, QSize(128, 128));
         bool fromPreview = !image.isNull();
 
         if (!fromPreview)
@@ -770,14 +1042,361 @@ void ImageProcessing::calculateImageMeanMap(const QList<QString> imageList,
         emit imageProcessed(imageFileName);
     };
 
-    QtConcurrent::map(imageList, scale).waitForFinished();
+    std::atomic<int> analysed{0};
+    int total = int(imageList.size());
+    std::function<void(const QString)> scale = [&](const QString imageFileName) {
+        analyse(imageFileName);
+        reportStep(tr("Analysing photos"), ++analysed, total);
+    };
+
+    std::vector<QString> files(imageList.begin(), imageList.end());
+    runLimited(files, m_readThreads, scale);
+}
+
+namespace
+{
+
+// Changing how tiles are cached needs a new version, so old files are not reused.
+const char *TileCacheVersion = "tile-v2";
+
+// Name of the cached tile of a photo at a size: from its path, size and modification time.
+QString tileFileName(const QString &imagePath, QSize size)
+{
+    QFileInfo info(imagePath);
+    QByteArray key = QStringLiteral("%1|%2|%3|%4|%5x%6")
+                         .arg(info.absoluteFilePath())
+                         .arg(info.size())
+                         .arg(info.lastModified().toMSecsSinceEpoch())
+                         .arg(TileCacheVersion)
+                         .arg(size.width())
+                         .arg(size.height())
+                         .toUtf8();
+
+    return QString::fromLatin1(QCryptographicHash::hash(key, QCryptographicHash::Sha256).toHex()) + ".png";
+}
+
+// A cached tile is only used at the size it was made for, so it holds the same pixels.
+bool tileMatches(const QString &file, QSize size)
+{
+    return QImageReader(file).size() == size;
+}
+
+} // namespace
+
+void ImageProcessing::setTileDirectory(const QString &directory)
+{
+    m_tileDirectory = directory;
+}
+
+QString ImageProcessing::tileDirectory() const
+{
+    if (!m_tileDirectory.isEmpty())
+        return m_tileDirectory;
+
+    return QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/imagemosaicwall/tiles";
+}
+
+void ImageProcessing::setThumbnailProvider(ThumbnailProvider provider)
+{
+    m_thumbnailProvider = std::move(provider);
+}
+
+void ImageProcessing::setReadThreads(int threads)
+{
+    m_readThreads = qMax(1, threads);
+}
+
+int ImageProcessing::readThreads() const
+{
+    return m_readThreads;
+}
+
+namespace
+{
+
+// Copies the visible part of a tile into the target. cellRect and visible are in target pixels,
+// origin is the target pixel of the top left of the region the target holds, and the color of the
+// cell is blended in: pixel = (1 - tint) * pixel + tint * color, with strength = 256 * tint.
+void drawTileInto(uchar *bits, qsizetype bytesPerLine, QPoint origin, const QImage &tile, QRect cellRect,
+                  QRect visible, QColor color, int strength)
+{
+    // Blend the cell's color into the tile, as the mosaic reads better from a distance.
+    int tr = color.red() * strength;
+    int tg = color.green() * strength;
+    int tb = color.blue() * strength;
+
+    for (int y = visible.top(); y <= visible.bottom(); ++y)
+    {
+        const QRgb *from = reinterpret_cast<const QRgb *>(tile.constScanLine(y - cellRect.top())) +
+                           (visible.left() - cellRect.left());
+        QRgb *to = reinterpret_cast<QRgb *>(bits + (y - origin.y()) * bytesPerLine) + (visible.left() - origin.x());
+
+        if (strength == 0)
+        {
+            memcpy(to, from, visible.width() * 4);
+            continue;
+        }
+
+        for (int x = 0; x < visible.width(); ++x)
+        {
+            QRgb c = from[x];
+            to[x] = qRgba((qRed(c) * (256 - strength) + tr) >> 8, (qGreen(c) * (256 - strength) + tg) >> 8,
+                          (qBlue(c) * (256 - strength) + tb) >> 8, qAlpha(c));
+        }
+    }
+}
+
+} // namespace
+
+QList<ImageProcessing::TilePlacement> ImageProcessing::placements() const
+{
+    QList<TilePlacement> list;
+
+    for (int i = 0; i < int(m_placedCells.size()); ++i)
+        list << tilePlacement(i);
+
+    return list;
+}
+
+ImageProcessing::TilePlacement ImageProcessing::tilePlacement(int index) const
+{
+    if (index < 0 || index >= int(m_placedCells.size()))
+        return TilePlacement{0, 0, QRect(), QString(), 0.0};
+
+    const PlacedCell &cell = m_placedCells[index];
+    return TilePlacement{cell.slot.y(), cell.slot.x(), cell.out, m_imagePaths[cell.image], cell.distance};
+}
+
+int ImageProcessing::tileAt(QPoint outputPoint) const
+{
+    for (int i = 0; i < int(m_placedCells.size()); ++i)
+        if (m_placedCells[i].out.contains(outputPoint))
+            return i;
+
+    return -1;
+}
+
+bool ImageProcessing::swapTile(int index)
+{
+    if (index < 0 || index >= int(m_placedCells.size()) || !replaceTile(index))
+        return false;
+
+    // Without the mosaic in memory, the new photo needs its tile in the cache.
+    if (!m_outputImage)
+        prepareTiles();
+
+    return true;
+}
+
+int ImageProcessing::excludePhoto(const QString &path)
+{
+    m_excludedPhotos.insert(path);
+
+    int unchanged = 0;
+
+    for (int i = 0; i < int(m_placedCells.size()); ++i)
+        if (isExcluded(m_placedCells[i].image) && !replaceTile(i))
+            ++unchanged;
+
+    if (!m_outputImage)
+        prepareTiles();
+
+    return unchanged;
+}
+
+QStringList ImageProcessing::excludedPhotos() const
+{
+    QStringList list(m_excludedPhotos.begin(), m_excludedPhotos.end());
+    list.sort();
+    return list;
+}
+
+void ImageProcessing::clearExcludedPhotos()
+{
+    m_excludedPhotos.clear();
+}
+
+double ImageProcessing::tileDistance(const CellFeatures &cell, int image) const
+{
+    // The same measure as generateImage() uses.
+    if (!m_layoutMatching)
+        return calculateDistance(cell.lab, m_imageLabs[image]);
+
+    double sum = 0.0;
+    for (int k = 0; k < CellLayoutSize * CellLayoutSize; ++k)
+        sum += calculateDistance(cell.layout[k], m_tileLayouts[image][k]);
+
+    return sum / (CellLayoutSize * CellLayoutSize);
+}
+
+bool ImageProcessing::isExcluded(int image) const
+{
+    return m_excludedPhotos.contains(m_imagePaths[image]);
+}
+
+int ImageProcessing::bestReplacement(int index) const
+{
+    const PlacedCell &placed = m_placedCells[index];
+    const CellFeatures &feature = m_cellFeatures[index];
+    int chosen = -1;
+    double best = std::numeric_limits<double>::max();
+
+    // The best photo of the cell's group other than the one in it, and not excluded. The
+    // variation and use limits of a whole mosaic are not applied to a single tile.
+    for (int image = 0; image < int(m_imagePaths.size()); ++image)
+    {
+        if (image == placed.image || m_imageGroups[image] != feature.group || isExcluded(image))
+            continue;
+
+        double d = tileDistance(feature, image);
+
+        if (d < best)
+        {
+            best = d;
+            chosen = image;
+        }
+    }
+
+    return chosen;
+}
+
+bool ImageProcessing::replaceTile(int index)
+{
+    int image = bestReplacement(index);
+
+    if (image < 0)
+        return false;
+
+    PlacedCell &placed = m_placedCells[index];
+    placed.image = image;
+    placed.distance = tileDistance(m_cellFeatures[index], image);
+
+    if (m_outputImage)
+        drawPlacedTile(*m_outputImage, placed);
+
+    return true;
+}
+
+void ImageProcessing::drawPlacedTile(QImage &target, const PlacedCell &cell) const
+{
+    QImage tile = loadTile(m_imagePaths[cell.image], cell.tileSize);
+
+    QRect visible = cell.out.intersected(QRect(QPoint(0, 0), target.size()))
+                        .intersected(QRect(cell.out.topLeft(), tile.size()));
+
+    if (visible.isEmpty())
+        return;
+
+    int strength = qBound(0, qRound(m_tint * 256), 256);
+    drawTileInto(target.bits(), target.bytesPerLine(), QPoint(0, 0), tile, cell.out, visible, cell.color, strength);
+}
+
+void ImageProcessing::reportStep(const QString &step, int done, int total)
+{
+    emit stepProgress(step, done, total);
+}
+
+bool ImageProcessing::prepareTiles()
+{
+    m_tileFiles.clear();
+
+    // The size each photo is drawn at. A photo belongs to one group of cells, so one size.
+    QHash<int, QSize> sizes;
+    for (const PlacedCell &cell : m_placedCells)
+        sizes.insert(cell.image, cell.tileSize);
+
+    QDir dir(tileDirectory());
+    if (!dir.mkpath("."))
+        return !m_skipBackgroundProcess;
+
+    std::vector<int> images;
+    for (auto it = sizes.constBegin(); it != sizes.constEnd(); ++it)
+        images.push_back(it.key());
+
+    // One file per photo, so the photos are written in parallel without sharing a file.
+    std::vector<QString> files(images.size());
+    std::vector<int> positions(images.size());
+    std::iota(positions.begin(), positions.end(), 0);
+    std::atomic<int> prepared{0};
+    int total = int(images.size());
+
+    runLimited(positions, m_readThreads, [&](int position) {
+        if (!m_skipBackgroundProcess)
+        {
+            int image = images[position];
+            QString path = m_imagePaths[image];
+            QSize size = sizes.value(image);
+            QString file = dir.filePath(tileFileName(path, size));
+
+            if (tileMatches(file, size))
+            {
+                files[position] = file;
+            }
+            else
+            {
+                // The tile as it is drawn, so drawing from the cache changes no pixel.
+                QImage tile = loadTile(path, size);
+
+                // Under a temporary name first, so an interrupted run leaves no broken tile.
+                QString temporary = file + ".part";
+                bool written = !tile.isNull() && tile.save(temporary, "PNG");
+
+                if (written)
+                {
+                    QFile::remove(file);
+                    written = QFile::rename(temporary, file);
+                }
+
+                if (written)
+                    files[position] = file;
+                else
+                    QFile::remove(temporary);
+            }
+        }
+
+        reportStep(tr("Preparing tiles"), ++prepared, total);
+    });
+
+    if (m_skipBackgroundProcess)
+        return false;
+
+    // A photo that could not be read stays out of the cache; loadTile() reads it directly
+    // and then gets nothing either.
+    for (size_t position = 0; position < images.size(); ++position)
+        if (!files[position].isEmpty())
+            m_tileFiles.insert(m_imagePaths[images[position]], CachedTile{files[position], sizes.value(images[position])});
+
+    return true;
 }
 
 QImage ImageProcessing::loadTile(const QString &imagePath, QSize cellSize) const
 {
-    QImage image = extractThumbnail(imagePath, cellSize);
+    QImage image;
+
+    // A cached tile of this size holds the same pixels as drawn from the photo. A larger one
+    // is scaled down, e.g. for the preview, which saves reading the photo again.
+    auto cached = m_tileFiles.constFind(imagePath);
+    if (cached != m_tileFiles.constEnd() && cached->size.width() >= cellSize.width() &&
+        cached->size.height() >= cellSize.height())
+    {
+        if (cached->size == cellSize)
+        {
+            QImage tile(cached->file);
+            if (!tile.isNull())
+                return tile.convertToFormat(QImage::Format_ARGB32);
+        }
+        else
+        {
+            image = QImage(cached->file);
+        }
+    }
+
     if (image.isNull())
-        image = loadOrientedImage(imagePath, cellSize);
+    {
+        image = extractThumbnail(imagePath, cellSize);
+        if (image.isNull())
+            image = loadOrientedImage(imagePath, cellSize);
+    }
 
     // Fill the cell and crop the overflow evenly from both sides, keeping the center.
     QImage scaled = image.scaled(cellSize, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
@@ -785,51 +1404,120 @@ QImage ImageProcessing::loadTile(const QString &imagePath, QSize cellSize) const
     return scaled.copy(QRect(cropOrigin, cellSize)).convertToFormat(QImage::Format_ARGB32);
 }
 
-void ImageProcessing::drawCell(int cell, QImage cellImage, QSize cellSize, int gridWidth, double tint)
+bool ImageProcessing::render(QImage &target, const QRect &region, double scale, bool reportProgress)
 {
-    GridPoint p(cell % gridWidth, cell / gridWidth);
+    target.fill(Qt::transparent);
 
-    // Blend the cell's color in the base image into the tile, as the mosaic reads better
-    // from a distance: pixel = (1 - tint) * pixel + tint * target.
-    if (tint > 0.0)
+    if (m_dotsPerMeter > 0)
     {
-        int strength = qBound(0, qRound(tint * 256), 256);
-        QRgb target = m_gridColorMap[cell].rgb();
-        int tr = qRed(target) * strength;
-        int tg = qGreen(target) * strength;
-        int tb = qBlue(target) * strength;
+        target.setDotsPerMeterX(m_dotsPerMeter);
+        target.setDotsPerMeterY(m_dotsPerMeter);
+    }
 
-        for (int y = 0; y < cellImage.height(); ++y)
+    // Output coordinates are mapped to target pixels by scaling and rounding down, so
+    // neighbouring cells meet exactly also in a scaled preview.
+    auto toTarget = [&](int v) { return int(std::floor(v * scale)); };
+    QRect bounds = QRect(QPoint(0, 0), m_outputSize).intersected(region);
+    QPoint origin(toTarget(region.x()), toTarget(region.y()));
+
+    // Cells of each image within the region, so every image is loaded only once.
+    std::map<int, std::vector<const PlacedCell *>> cellsOfImage;
+    for (const PlacedCell &cell : m_placedCells)
+        if (cell.out.intersects(bounds))
+            cellsOfImage[cell.image].push_back(&cell);
+
+    std::vector<int> images;
+    for (const auto &entry : cellsOfImage)
+        images.push_back(entry.first);
+
+    uchar *bits = target.bits();
+    qsizetype bytesPerLine = target.bytesPerLine();
+    int strength = qBound(0, qRound(m_tint * 256), 256);
+
+    // In parallel per image; cells never overlap, so threads never write the same pixels.
+    QtConcurrent::blockingMap(images, [&](int image) {
+        if (m_skipBackgroundProcess)
+            return;
+
+        const std::vector<const PlacedCell *> &imageCells = cellsOfImage.at(image);
+        QSize tileSize = imageCells.front()->tileSize;
+        QSize scaledTile(qMax(1, qCeil(tileSize.width() * scale)), qMax(1, qCeil(tileSize.height() * scale)));
+        QImage tile = loadTile(m_imagePaths[image], scaledTile);
+
+        for (const PlacedCell *cell : imageCells)
         {
-            QRgb *line = reinterpret_cast<QRgb *>(cellImage.scanLine(y));
+            // The cell in target pixels, and the part of it inside the region.
+            QRect cellRect(QPoint(toTarget(cell->out.left()), toTarget(cell->out.top())),
+                           QPoint(toTarget(cell->out.right() + 1) - 1, toTarget(cell->out.bottom() + 1) - 1));
+            QRect visible = cellRect.intersected(QRect(QPoint(toTarget(bounds.left()), toTarget(bounds.top())),
+                                                       QPoint(toTarget(bounds.right() + 1) - 1,
+                                                              toTarget(bounds.bottom() + 1) - 1)));
+            visible = visible.intersected(QRect(cellRect.topLeft(), tile.size()));
 
-            for (int x = 0; x < cellImage.width(); ++x)
-            {
-                QRgb c = line[x];
-                line[x] = qRgba((qRed(c) * (256 - strength) + tr) >> 8,
-                                (qGreen(c) * (256 - strength) + tg) >> 8,
-                                (qBlue(c) * (256 - strength) + tb) >> 8,
-                                qAlpha(c));
-            }
+            if (visible.isEmpty())
+                continue;
+
+            if (reportProgress)
+                emit mosaicGenerated(cell->slot);
+
+            drawTileInto(bits, bytesPerLine, origin, tile, cellRect, visible, cell->color, strength);
         }
-    }
+    });
 
-    emit mosaicGenerated(p);
+    return !m_skipBackgroundProcess;
+}
 
-    // Each cell is a separate region of the buffer, so threads never write the same pixels.
-    int x0 = p.x() * cellSize.width();
-    int y0 = p.y() * cellSize.height();
-    int w = qMin(cellImage.width(), m_outputSize.width() - x0);
-    int h = qMin(cellImage.height(), m_outputSize.height() - y0);
+bool ImageProcessing::hasMosaic() const
+{
+    return !m_placedCells.empty();
+}
 
-    // With a rounded-up cell size the last rows/columns can start past the image edge.
-    if (w <= 0 || h <= 0)
-        return;
+QSize ImageProcessing::mosaicSize() const
+{
+    return hasMosaic() ? m_outputSize : QSize();
+}
 
-    for (int y = 0; y < h; ++y)
-    {
-        memcpy(m_outputBits + (y0 + y) * m_outputBytesPerLine + x0 * 4, cellImage.constScanLine(y), w * 4);
-    }
+QImage ImageProcessing::renderRegion(const QRect &region)
+{
+    if (!hasMosaic() || region.isEmpty())
+        return QImage();
+
+    QImage image(region.size(), QImage::Format_ARGB32);
+    if (image.isNull() || !render(image, region, 1.0, false))
+        return QImage();
+
+    return image;
+}
+
+QImage ImageProcessing::renderPreview(QSize maxSize)
+{
+    if (!hasMosaic())
+        return QImage();
+
+    double scale = qMin(1.0, qMin(maxSize.width() / double(m_outputSize.width()),
+                                  maxSize.height() / double(m_outputSize.height())));
+    QSize size(qMax(1, int(std::floor(m_outputSize.width() * scale))), qMax(1, int(std::floor(m_outputSize.height() * scale))));
+
+    QImage image(size, QImage::Format_ARGB32);
+    if (image.isNull() || !render(image, QRect(QPoint(0, 0), m_outputSize), scale, false))
+        return QImage();
+
+    return image;
+}
+
+void ImageProcessing::setDotsPerInch(int dotsPerInch)
+{
+    m_dotsPerMeter = qRound(dotsPerInch / 0.0254);
+}
+
+qint64 ImageProcessing::maxImageBytes() const
+{
+    return m_maxImageBytes;
+}
+
+void ImageProcessing::setMaxImageBytes(qint64 bytes)
+{
+    m_maxImageBytes = bytes;
 }
 
 double ImageProcessing::calculateDistance(QColor rhs, QColor lhs) const
@@ -880,6 +1568,7 @@ void ImageProcessing::processGrid(const QImage &baseImage, QSize gridSize)
     QThreadPool pool;
 
     m_gridColorMap.resize(numCells);
+    m_progressDone = 0;
 
     // Converted once here for all threads; calculateGridCellsMean() reads ARGB32 scan lines.
     QImage argbImage = baseImage.convertToFormat(QImage::Format_ARGB32);
@@ -1070,6 +1759,169 @@ int rowsForTileAspect(QSize imageSize, int columns, double tileAspect)
 
     // Cells are imageWidth / columns wide and that divided by tileAspect high.
     return qMax(1, qRound(imageSize.height() * columns * tileAspect / imageSize.width()));
+}
+
+QList<QRect> posterRegions(QSize size, int columns, int rows, int overlap)
+{
+    QList<QRect> parts;
+
+    for (int r = 0; r < rows; ++r)
+    {
+        for (int c = 0; c < columns; ++c)
+        {
+            int left = int(qint64(size.width()) * c / columns);
+            int right = int(qint64(size.width()) * (c + 1) / columns);
+            int top = int(qint64(size.height()) * r / rows);
+            int bottom = int(qint64(size.height()) * (r + 1) / rows);
+
+            QRect part(QPoint(left - overlap, top - overlap), QPoint(right - 1 + overlap, bottom - 1 + overlap));
+            parts << part.intersected(QRect(QPoint(0, 0), size));
+        }
+    }
+
+    return parts;
+}
+
+bool saveMosaicPart(ImageProcessing &processing, const QImage *whole, const MosaicPart &part, int dotsPerInch,
+                    QString &error)
+{
+    QString suffix = QFileInfo(part.fileName).suffix().toLower();
+
+    if (suffix == "tif" || suffix == "tiff")
+    {
+        TiffWriter writer;
+        if (!writer.open(part.fileName, part.region.size(), dotsPerInch))
+        {
+            error = writer.errorString();
+            return false;
+        }
+
+        // Strips of about 64 MB while drawing.
+        int stripRows = qMax(1, int((qint64(64) << 20) / (qint64(part.region.width()) * 4)));
+        int strips = (part.region.height() + stripRows - 1) / stripRows;
+        int drawn = 0;
+
+        processing.reportStep(QObject::tr("Drawing mosaic"), 0, strips);
+
+        for (int y = part.region.top(); y <= part.region.bottom(); y += stripRows)
+        {
+            QRect strip(part.region.left(), y, part.region.width(), qMin(stripRows, part.region.bottom() + 1 - y));
+            QImage rows = whole ? whole->copy(strip) : processing.renderRegion(strip);
+
+            if (rows.isNull() || !writer.writeRows(rows))
+            {
+                error = rows.isNull() ? QObject::tr("The mosaic could not be drawn.") : writer.errorString();
+                return false;
+            }
+
+            processing.reportStep(QObject::tr("Drawing mosaic"), ++drawn, strips);
+        }
+
+        if (!writer.close())
+        {
+            error = writer.errorString();
+            return false;
+        }
+
+        return true;
+    }
+
+    if (!whole && qint64(part.region.width()) * part.region.height() * 4 > processing.maxImageBytes())
+    {
+        error = QObject::tr("It is too large for PNG or JPEG. Please save it as TIFF, or in more poster parts.");
+        return false;
+    }
+
+    // The drawn images carry the print resolution already; setting it here would copy
+    // the whole mosaic.
+    processing.reportStep(QObject::tr("Drawing mosaic"), 0, 1);
+    QImage image = !whole ? processing.renderRegion(part.region)
+                          : part.region == whole->rect() ? *whole : whole->copy(part.region);
+    processing.reportStep(QObject::tr("Drawing mosaic"), 1, 1);
+
+    if (image.isNull())
+    {
+        error = QObject::tr("The mosaic could not be drawn.");
+        return false;
+    }
+
+    if (!image.save(part.fileName))
+    {
+        error = QObject::tr("The file could not be written.");
+        return false;
+    }
+
+    return true;
+}
+
+bool writeTilePlacements(const QList<ImageProcessing::TilePlacement> &placements, const QString &fileName,
+                         QString &error)
+{
+    QFile file(fileName);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    {
+        error = file.errorString();
+        return false;
+    }
+
+    QByteArray data;
+
+    if (QFileInfo(fileName).suffix().toLower() == "json")
+    {
+        QJsonArray array;
+
+        for (const ImageProcessing::TilePlacement &tile : placements)
+        {
+            QJsonObject object;
+            object["row"] = tile.row + 1;
+            object["column"] = tile.column + 1;
+            object["x"] = tile.rect.x();
+            object["y"] = tile.rect.y();
+            object["width"] = tile.rect.width();
+            object["height"] = tile.rect.height();
+            object["path"] = tile.path;
+            object["distance"] = tile.distance;
+            array.append(object);
+        }
+
+        data = QJsonDocument(array).toJson(QJsonDocument::Indented);
+    }
+    else
+    {
+        // A path is quoted when it has a comma, a quote or a line break; quotes are doubled.
+        auto field = [](const QString &text) {
+            if (!text.contains(QLatin1Char(',')) && !text.contains(QLatin1Char('"')) &&
+                !text.contains(QLatin1Char('\n')))
+                return text;
+
+            return QLatin1Char('"') + QString(text).replace(QLatin1Char('"'), QLatin1String("\"\"")) +
+                   QLatin1Char('"');
+        };
+
+        data += "row,column,x,y,width,height,path,distance\n";
+
+        for (const ImageProcessing::TilePlacement &tile : placements)
+        {
+            data += QStringLiteral("%1,%2,%3,%4,%5,%6,%7,%8\n")
+                        .arg(tile.row + 1)
+                        .arg(tile.column + 1)
+                        .arg(tile.rect.x())
+                        .arg(tile.rect.y())
+                        .arg(tile.rect.width())
+                        .arg(tile.rect.height())
+                        .arg(field(tile.path))
+                        .arg(tile.distance, 0, 'f', 6)
+                        .toUtf8();
+        }
+    }
+
+    if (file.write(data) != data.size())
+    {
+        error = file.errorString();
+        return false;
+    }
+
+    return true;
 }
 
 QString suggestedMosaicFileName(const QString &baseImagePath, const QString &folder)

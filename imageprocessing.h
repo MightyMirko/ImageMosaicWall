@@ -3,6 +3,9 @@
 
 #include <math.h>
 #include <array>
+#include <functional>
+#include <QSet>
+#include <QStringList>
 #include <memory>
 #include <QColor>
 #include <QMap>
@@ -22,6 +25,10 @@ struct ColorLab
 {
     double L, a, b;
 };
+
+// Cells and the visible part of tiles are compared as a grid of this many colors per side.
+const int CellLayoutSize = 4;
+using LabLayout = std::array<ColorLab, CellLayoutSize * CellLayoutSize>;
 
 struct GridPoint : public QPoint
 {
@@ -49,6 +56,17 @@ enum class Matching
     MeanColor    // the mean color of the whole tile only (faster, the original behaviour)
 };
 
+// How the mosaic is divided into cells.
+enum class Pattern
+{
+    Grid,    // rows and columns of equal cells
+    Parquet  // upright slots of 1 : sqrt(2), each with one portrait photo or two landscape
+             // photos stacked; photos only go into cells of their own orientation
+};
+
+// Width / height of a parquet slot; two cells of sqrt(2) : 1 stacked fill it exactly.
+const double ParquetSlotAspect = 0.70710678118654752;
+
 // Mean colors of an 8 x 8 grid over a tile image, RGB, row by row.
 static const int TileLayoutSize = 8;
 using TileLayout = std::array<quint8, TileLayoutSize * TileLayoutSize * 3>;
@@ -68,9 +86,11 @@ public:
     void processMosaicImages(const QList<QString> &);
     // history: variation radius in cells; maxUses: how often one image may be used, 0 = no limit;
     // tint: 0..1, how much of the cell's target color is blended into its tile;
-    // useEveryImage: every image gets at least one cell, if there are enough cells.
+    // useEveryImage: every image gets at least one cell, if there are enough cells;
+    // pattern: with Pattern::Parquet, gridSize counts slots instead of cells.
     bool generateImage(QSize outputSize, QSize gridSize, int history, int maxUses = 0, double tint = 0.0,
-                       Matching matching = Matching::ColorLayout, bool useEveryImage = false);
+                       Matching matching = Matching::ColorLayout, bool useEveryImage = false,
+                       Pattern pattern = Pattern::Grid);
     bool isReady();
 
     // Where analysed tile images are cached; empty means TileCache::defaultFileName().
@@ -78,22 +98,88 @@ public:
     // Number of images taken from the cache by the last processMosaicImages().
     int cacheHits() const;
 
+    // One tile of the mosaic: its row and column in the grid, where it is in the output (pixels),
+    // the photo, and how well the photo matches its cell (lower is better).
+    struct TilePlacement
+    {
+        int row;
+        int column;
+        QRect rect;
+        QString path;
+        double distance;
+    };
+
+    // All tiles of the mosaic last generated, in grid order.
+    QList<TilePlacement> placements() const;
+    TilePlacement tilePlacement(int index) const;
+    // The tile at a point of the output, or -1.
+    int tileAt(QPoint outputPoint) const;
+
+    // Puts the best other photo of the tile's group into it. False if there is none.
+    bool swapTile(int index);
+    // Keeps a photo out of the mosaic, now and when it is generated again. Its tiles get the
+    // best other photo of their group. Returns how many tiles still show it, 0 if all were changed.
+    int excludePhoto(const QString &path);
+    QStringList excludedPhotos() const;
+    void clearExcludedPhotos();
+
+    // Where the tiles of a mosaic too large to keep in memory are cached, one PNG per photo and
+    // size, so each photo is read once for all strips of the output. The tiles are lossless and
+    // the same as drawn. Empty means the user's cache directory. The files are kept between
+    // runs and reused while the photo is unchanged.
+    void setTileDirectory(const QString &directory);
+
+    // A source of photo thumbnails, e.g. from the host application's thumbnail database. Used
+    // for the analysis of the photos when it has one; a null image means "none, read the photo".
+    // Called from several threads at once.
+    using ThumbnailProvider = std::function<QImage(const QString &, QSize)>;
+    void setThumbnailProvider(ThumbnailProvider provider);
+
+    // Threads that read photos from disk. A disk serves its reads one after another, so more
+    // threads don't read faster; they only compete for the disk.
+    void setReadThreads(int threads);
+    int readThreads() const;
+
+    // Reports the progress of the current step, from any thread: done of total items.
+    void reportStep(const QString &step, int done, int total);
+
 signals:
     void mosaicGenerated(const GridPoint);
     void cellProcessed(const int cellIndex);
     void imageProcessed(const QString image);
+    // A step of the work, e.g. "Analysing photos", with how many of its items are done.
+    void stepProgress(const QString &step, int done, int total);
 
 private:
     void calculateGridCellsMean(const QImage &, const QSize &, std::vector<QColor> &, int, int);
     void calculateImageMeanMap(const QList<QString>, const QHash<QString, TileCache::Entry> &cached);
     QImage loadTile(const QString &imagePath, QSize cellSize) const;
-    void drawCell(int cell, QImage tile, QSize cellSize, int gridWidth, double tint);
+    // Caches the tiles of the placed cells (see setTileDirectory); false if cancelled.
+    bool prepareTiles();
+    QString tileDirectory() const;
+    bool render(QImage &target, const QRect &region, double scale, bool reportProgress);
     double calculateDistance(QColor rhs, QColor lhs) const;
     double calculateDistance(ColorLab rhs, ColorLab lhs) const;
 
 public:
     std::vector<QColor> getGridColorMap() const;
+    // The mosaic of the last generateImage(), or nullptr if there is none or it is larger
+    // than maxImageBytes(); it can then be drawn in parts with renderRegion().
     const QImage *getOutputImage() const;
+
+    // Whether generateImage() has placed the photos of a mosaic, and its size.
+    bool hasMosaic() const;
+    QSize mosaicSize() const;
+    // Draws a part of that mosaic (ARGB32, region.size()), e.g. to save it in strips or
+    // as poster parts; or all of it scaled down to fit maxSize as preview. Empty if
+    // cancelled. They don't keep the result, so any size can be drawn piece by piece.
+    QImage renderRegion(const QRect &region);
+    QImage renderPreview(QSize maxSize);
+    // The print resolution stored in the drawn images, so it is saved with them.
+    void setDotsPerInch(int dotsPerInch);
+    // Mosaics up to this size in bytes (4 per pixel) are drawn by generateImage() as a whole.
+    qint64 maxImageBytes() const;
+    void setMaxImageBytes(qint64 bytes);
     QMap<QString, QColor> getImageMeanMap() const;
 
 private:
@@ -108,12 +194,61 @@ private:
     QMutex m_lockMean;
     QSize m_outputSize;
     std::shared_ptr<QImage> m_outputImage;
-    uchar *m_outputBits = nullptr;
-    qsizetype m_outputBytesPerLine = 0;
+    qint64 m_maxImageBytes = qint64(1) << 30;
+    ThumbnailProvider m_thumbnailProvider;
+    int m_readThreads = 4;
+
+    // A cell of the last generated mosaic with its image: where it is drawn, the size its
+    // tile is loaded at, the target color for tint, and its slot of the grid.
+    struct PlacedCell
+    {
+        QRect out;
+        int image;
+        QSize tileSize;
+        QColor color;
+        GridPoint slot;
+        double distance;
+    };
+
+    // What a cell was matched with: its color and layout, and its group of photos.
+    struct CellFeatures
+    {
+        ColorLab lab;
+        LabLayout layout;
+        int group;
+    };
+
+    std::vector<CellFeatures> m_cellFeatures;   // parallel to m_placedCells
+    std::vector<int> m_imageGroups;             // group of each photo
+    std::vector<LabLayout> m_tileLayouts;       // of each photo, with layout matching only
+    bool m_layoutMatching = false;
+    QSize m_gridSize;
+    QSet<QString> m_excludedPhotos;
+
+    double tileDistance(const CellFeatures &cell, int image) const;
+    bool isExcluded(int image) const;
+    int bestReplacement(int index) const;
+    bool replaceTile(int index);
+    void drawPlacedTile(QImage &target, const PlacedCell &cell) const;
+
+    std::vector<PlacedCell> m_placedCells;
+    double m_tint = 0.0;
+    int m_dotsPerMeter = 0;
     std::atomic<bool> m_skipBackgroundProcess;
     QString m_cacheFile;
     std::atomic<int> m_cacheHits{0};
     QList<QPair<QString, TileCache::Entry>> m_newCacheEntries;
+    QString m_tileDirectory;
+    // A photo's cached tile: the file, and the size it was made at.
+    struct CachedTile
+    {
+        QString file;
+        QSize size;
+    };
+
+    // Photo path -> its cached tile, for the mosaic placed last; read-only while drawing.
+    QHash<QString, CachedTile> m_tileFiles;
+    std::atomic<int> m_progressDone{0};
 };
 
 /**
@@ -207,6 +342,28 @@ QStringList supportedImageNameFilters();
 // of imageSize is divided into columns; at least 1.
 int rowsForTileAspect(QSize imageSize, int columns, double tileAspect);
 QList<QString> withoutRawDuplicates(const QList<QString> &files);
+
+// The regions of a mosaic of size split into columns x rows poster parts, row by row;
+// each reaches overlap pixels into its neighbours, but not beyond the mosaic.
+QList<QRect> posterRegions(QSize size, int columns, int rows, int overlap);
+
+// One file to save: a region of the mosaic.
+struct MosaicPart
+{
+    QRect region;
+    QString fileName;
+};
+
+// Saves a part of the mosaic last generated by processing; whole is that mosaic, or
+// nullptr if it was too large to keep in memory. TIFF is written in strips, so it can be
+// of any size; PNG and JPEG need the part in memory at once. On failure error says why.
+bool saveMosaicPart(ImageProcessing &processing, const QImage *whole, const MosaicPart &part, int dotsPerInch,
+                    QString &error);
+
+// Writes which photo is in which tile: CSV, or JSON if the file name ends in .json. On failure
+// error says why.
+bool writeTilePlacements(const QList<ImageProcessing::TilePlacement> &placements, const QString &fileName,
+                         QString &error);
 
 // How camera RAW files in the tile folder are used.
 enum class RawFiles

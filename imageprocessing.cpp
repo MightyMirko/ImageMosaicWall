@@ -11,6 +11,10 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QCryptographicHash>
+#include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QDir>
 #include <QFileInfo>
 #include <QStandardPaths>
@@ -52,9 +56,6 @@ struct Candidate
 // already used nearby is the whole list searched again.
 const int CandidatesPerCell = 64;
 
-// Cells and the visible part of tiles are compared as a grid of this many colors per side.
-const int CellLayoutSize = 4;
-using LabLayout = std::array<ColorLab, CellLayoutSize * CellLayoutSize>;
 
 TileLayout computeTileLayout(const QImage &image)
 {
@@ -396,6 +397,7 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
 
     m_outputImage.reset();
     m_placedCells.clear();
+    m_cellFeatures.clear();
     m_tileFiles.clear();
 
     int gridWidth = gridSize.width();
@@ -512,7 +514,8 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
 
     std::vector<int> groupImages[2];
     for (int image : sortedByLightness(imageKeys))
-        groupImages[imageGroup[image]].push_back(image);
+        if (!isExcluded(image))
+            groupImages[imageGroup[image]].push_back(image);
 
     std::vector<std::vector<Candidate>> candidates(numCells);
 
@@ -639,6 +642,11 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
         activeCells.push_back(cell);
     }
 
+    // Every placed cell needs a photo of its group; without one there is no mosaic.
+    for (int cell : activeCells)
+        if (groupImages[cells[cell].group].empty())
+            return false;
+
     // 2. One cell after the other, so every choice sees all choices made before it.
     // Cells whose best match is worst go first: they depend most on their few good
     // images, which easier cells would otherwise take. No randomness is involved, so
@@ -676,8 +684,11 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
     // end up with leftovers, and they take few cells away from the others.
     if (useEveryImage)
     {
-        std::vector<int> images(numImages);
-        std::iota(images.begin(), images.end(), 0);
+        std::vector<int> images;
+        for (int image = 0; image < numImages; ++image)
+            if (!isExcluded(image))
+                images.push_back(image);
+
         std::vector<std::vector<Candidate>> bestCells(numImages);   // Candidate::image is a cell here
 
         std::vector<int> cellsByLightness[2];
@@ -741,7 +752,8 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
     // The images of each group in index order, so ties resolve to the lowest index.
     std::vector<int> groupImagesByIndex[2];
     for (int image = 0; image < numImages; ++image)
-        groupImagesByIndex[imageGroup[image]].push_back(image);
+        if (!isExcluded(image))
+            groupImagesByIndex[imageGroup[image]].push_back(image);
 
     // Best image of the cell's group that passes the given test, or -1.
     auto bestOf = [&](int cell, auto &&allowed) {
@@ -826,11 +838,19 @@ bool ImageProcessing::generateImage(QSize outputSize, QSize gridSize, int histor
     // 3. Keep where every image goes, and draw the mosaic unless it is too large to be
     // kept in memory as a whole; it is then drawn in parts when it is saved.
 
+    m_imageGroups = imageGroup;
+    m_layoutMatching = layoutMatching;
+    m_tileLayouts = layoutMatching ? tileLayouts : std::vector<LabLayout>();
+    m_gridSize = gridSize;
+
     for (int cell : activeCells)
     {
         int slot = cells[cell].slot;
         m_placedCells.push_back({cells[cell].out, assigned[cell], groupTileSize[imageGroup[assigned[cell]]],
-                                 cellColors[cell], GridPoint(slot % gridWidth, slot / gridWidth)});
+                                 cellColors[cell], GridPoint(slot % gridWidth, slot / gridWidth),
+                                 distance(cell, assigned[cell])});
+        m_cellFeatures.push_back({cellLabs[cell], layoutMatching ? cellLayouts[cell] : LabLayout(),
+                                  cells[cell].group});
     }
 
     m_outputSize = outputSize;
@@ -1074,6 +1094,186 @@ int ImageProcessing::readThreads() const
     return m_readThreads;
 }
 
+namespace
+{
+
+// Copies the visible part of a tile into the target. cellRect and visible are in target pixels,
+// origin is the target pixel of the top left of the region the target holds, and the color of the
+// cell is blended in: pixel = (1 - tint) * pixel + tint * color, with strength = 256 * tint.
+void drawTileInto(uchar *bits, qsizetype bytesPerLine, QPoint origin, const QImage &tile, QRect cellRect,
+                  QRect visible, QColor color, int strength)
+{
+    // Blend the cell's color into the tile, as the mosaic reads better from a distance.
+    int tr = color.red() * strength;
+    int tg = color.green() * strength;
+    int tb = color.blue() * strength;
+
+    for (int y = visible.top(); y <= visible.bottom(); ++y)
+    {
+        const QRgb *from = reinterpret_cast<const QRgb *>(tile.constScanLine(y - cellRect.top())) +
+                           (visible.left() - cellRect.left());
+        QRgb *to = reinterpret_cast<QRgb *>(bits + (y - origin.y()) * bytesPerLine) + (visible.left() - origin.x());
+
+        if (strength == 0)
+        {
+            memcpy(to, from, visible.width() * 4);
+            continue;
+        }
+
+        for (int x = 0; x < visible.width(); ++x)
+        {
+            QRgb c = from[x];
+            to[x] = qRgba((qRed(c) * (256 - strength) + tr) >> 8, (qGreen(c) * (256 - strength) + tg) >> 8,
+                          (qBlue(c) * (256 - strength) + tb) >> 8, qAlpha(c));
+        }
+    }
+}
+
+} // namespace
+
+QList<ImageProcessing::TilePlacement> ImageProcessing::placements() const
+{
+    QList<TilePlacement> list;
+
+    for (int i = 0; i < int(m_placedCells.size()); ++i)
+        list << tilePlacement(i);
+
+    return list;
+}
+
+ImageProcessing::TilePlacement ImageProcessing::tilePlacement(int index) const
+{
+    if (index < 0 || index >= int(m_placedCells.size()))
+        return TilePlacement{0, 0, QRect(), QString(), 0.0};
+
+    const PlacedCell &cell = m_placedCells[index];
+    return TilePlacement{cell.slot.y(), cell.slot.x(), cell.out, m_imagePaths[cell.image], cell.distance};
+}
+
+int ImageProcessing::tileAt(QPoint outputPoint) const
+{
+    for (int i = 0; i < int(m_placedCells.size()); ++i)
+        if (m_placedCells[i].out.contains(outputPoint))
+            return i;
+
+    return -1;
+}
+
+bool ImageProcessing::swapTile(int index)
+{
+    if (index < 0 || index >= int(m_placedCells.size()) || !replaceTile(index))
+        return false;
+
+    // Without the mosaic in memory, the new photo needs its tile in the cache.
+    if (!m_outputImage)
+        prepareTiles();
+
+    return true;
+}
+
+int ImageProcessing::excludePhoto(const QString &path)
+{
+    m_excludedPhotos.insert(path);
+
+    int unchanged = 0;
+
+    for (int i = 0; i < int(m_placedCells.size()); ++i)
+        if (isExcluded(m_placedCells[i].image) && !replaceTile(i))
+            ++unchanged;
+
+    if (!m_outputImage)
+        prepareTiles();
+
+    return unchanged;
+}
+
+QStringList ImageProcessing::excludedPhotos() const
+{
+    QStringList list(m_excludedPhotos.begin(), m_excludedPhotos.end());
+    list.sort();
+    return list;
+}
+
+void ImageProcessing::clearExcludedPhotos()
+{
+    m_excludedPhotos.clear();
+}
+
+double ImageProcessing::tileDistance(const CellFeatures &cell, int image) const
+{
+    // The same measure as generateImage() uses.
+    if (!m_layoutMatching)
+        return calculateDistance(cell.lab, m_imageLabs[image]);
+
+    double sum = 0.0;
+    for (int k = 0; k < CellLayoutSize * CellLayoutSize; ++k)
+        sum += calculateDistance(cell.layout[k], m_tileLayouts[image][k]);
+
+    return sum / (CellLayoutSize * CellLayoutSize);
+}
+
+bool ImageProcessing::isExcluded(int image) const
+{
+    return m_excludedPhotos.contains(m_imagePaths[image]);
+}
+
+int ImageProcessing::bestReplacement(int index) const
+{
+    const PlacedCell &placed = m_placedCells[index];
+    const CellFeatures &feature = m_cellFeatures[index];
+    int chosen = -1;
+    double best = std::numeric_limits<double>::max();
+
+    // The best photo of the cell's group other than the one in it, and not excluded. The
+    // variation and use limits of a whole mosaic are not applied to a single tile.
+    for (int image = 0; image < int(m_imagePaths.size()); ++image)
+    {
+        if (image == placed.image || m_imageGroups[image] != feature.group || isExcluded(image))
+            continue;
+
+        double d = tileDistance(feature, image);
+
+        if (d < best)
+        {
+            best = d;
+            chosen = image;
+        }
+    }
+
+    return chosen;
+}
+
+bool ImageProcessing::replaceTile(int index)
+{
+    int image = bestReplacement(index);
+
+    if (image < 0)
+        return false;
+
+    PlacedCell &placed = m_placedCells[index];
+    placed.image = image;
+    placed.distance = tileDistance(m_cellFeatures[index], image);
+
+    if (m_outputImage)
+        drawPlacedTile(*m_outputImage, placed);
+
+    return true;
+}
+
+void ImageProcessing::drawPlacedTile(QImage &target, const PlacedCell &cell) const
+{
+    QImage tile = loadTile(m_imagePaths[cell.image], cell.tileSize);
+
+    QRect visible = cell.out.intersected(QRect(QPoint(0, 0), target.size()))
+                        .intersected(QRect(cell.out.topLeft(), tile.size()));
+
+    if (visible.isEmpty())
+        return;
+
+    int strength = qBound(0, qRound(m_tint * 256), 256);
+    drawTileInto(target.bits(), target.bytesPerLine(), QPoint(0, 0), tile, cell.out, visible, cell.color, strength);
+}
+
 void ImageProcessing::reportStep(const QString &step, int done, int total)
 {
     emit stepProgress(step, done, total);
@@ -1246,31 +1446,7 @@ bool ImageProcessing::render(QImage &target, const QRect &region, double scale, 
             if (reportProgress)
                 emit mosaicGenerated(cell->slot);
 
-            // Blend the cell's color in the base image into the tile, as the mosaic reads
-            // better from a distance: pixel = (1 - tint) * pixel + tint * target.
-            int tr = cell->color.red() * strength;
-            int tg = cell->color.green() * strength;
-            int tb = cell->color.blue() * strength;
-
-            for (int y = visible.top(); y <= visible.bottom(); ++y)
-            {
-                const QRgb *from = reinterpret_cast<const QRgb *>(tile.constScanLine(y - cellRect.top())) +
-                                   (visible.left() - cellRect.left());
-                QRgb *to = reinterpret_cast<QRgb *>(bits + (y - origin.y()) * bytesPerLine) + (visible.left() - origin.x());
-
-                if (strength == 0)
-                {
-                    memcpy(to, from, visible.width() * 4);
-                    continue;
-                }
-
-                for (int x = 0; x < visible.width(); ++x)
-                {
-                    QRgb c = from[x];
-                    to[x] = qRgba((qRed(c) * (256 - strength) + tr) >> 8, (qGreen(c) * (256 - strength) + tg) >> 8,
-                                  (qBlue(c) * (256 - strength) + tb) >> 8, qAlpha(c));
-                }
-            }
+            drawTileInto(bits, bytesPerLine, origin, tile, cellRect, visible, cell->color, strength);
         }
     });
 
@@ -1658,6 +1834,76 @@ bool saveMosaicPart(ImageProcessing &processing, const QImage *whole, const Mosa
     if (!image.save(part.fileName))
     {
         error = QObject::tr("The file could not be written.");
+        return false;
+    }
+
+    return true;
+}
+
+bool writeTilePlacements(const QList<ImageProcessing::TilePlacement> &placements, const QString &fileName,
+                         QString &error)
+{
+    QFile file(fileName);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    {
+        error = file.errorString();
+        return false;
+    }
+
+    QByteArray data;
+
+    if (QFileInfo(fileName).suffix().toLower() == "json")
+    {
+        QJsonArray array;
+
+        for (const ImageProcessing::TilePlacement &tile : placements)
+        {
+            QJsonObject object;
+            object["row"] = tile.row;
+            object["column"] = tile.column;
+            object["x"] = tile.rect.x();
+            object["y"] = tile.rect.y();
+            object["width"] = tile.rect.width();
+            object["height"] = tile.rect.height();
+            object["path"] = tile.path;
+            object["distance"] = tile.distance;
+            array.append(object);
+        }
+
+        data = QJsonDocument(array).toJson(QJsonDocument::Indented);
+    }
+    else
+    {
+        // A path is quoted when it has a comma, a quote or a line break; quotes are doubled.
+        auto field = [](const QString &text) {
+            if (!text.contains(QLatin1Char(',')) && !text.contains(QLatin1Char('"')) &&
+                !text.contains(QLatin1Char('\n')))
+                return text;
+
+            return QLatin1Char('"') + QString(text).replace(QLatin1Char('"'), QLatin1String("\"\"")) +
+                   QLatin1Char('"');
+        };
+
+        data += "row,column,x,y,width,height,path,distance\n";
+
+        for (const ImageProcessing::TilePlacement &tile : placements)
+        {
+            data += QStringLiteral("%1,%2,%3,%4,%5,%6,%7,%8\n")
+                        .arg(tile.row + 1)
+                        .arg(tile.column + 1)
+                        .arg(tile.rect.x())
+                        .arg(tile.rect.y())
+                        .arg(tile.rect.width())
+                        .arg(tile.rect.height())
+                        .arg(field(tile.path))
+                        .arg(tile.distance, 0, 'f', 6)
+                        .toUtf8();
+        }
+    }
+
+    if (file.write(data) != data.size())
+    {
+        error = file.errorString();
         return false;
     }
 

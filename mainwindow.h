@@ -3,7 +3,9 @@
 
 #include "imageprocessing.h"
 #include "imageviewer.h"
+#include <QFrame>
 #include <QFutureWatcher>
+#include <QLabel>
 #include <QImage>
 #include <QMainWindow>
 #include <QMap>
@@ -72,6 +74,12 @@ public slots:
   void onImageCellProgress();
   void onImageLoadPorgress();
   void onStepProgress(const QString &step, int done, int total);
+  // A click on the mosaic: the tile under it gets the tile panel.
+  void onTileClicked(QPointF scenePos);
+  void swapSelectedTile();
+  void excludeSelectedTile();
+  void resetExclusions();
+  void exportTileList();
 
 private slots:
   void on_btnGenerate_clicked();
@@ -91,6 +99,23 @@ private:
   QSize m_lockedResolution;
   QSize m_processedGridSize;
   QImage m_largePreview;   // shown for mosaics too large to be kept in memory
+
+  // The tile panel over the image, shown after a click on a tile, and its buttons.
+  void setupTileInfo();
+  void setupExport();
+  void showTileInfo();
+  void hideTileInfo();
+  void refreshMosaic();
+  int m_selectedTile = -1;
+  QFrame *m_tileInfo = nullptr;
+  QLabel *m_tileInfoText = nullptr;
+  QPushButton *m_btnSwapTile = nullptr;
+  QPushButton *m_btnExcludeTile = nullptr;
+  QPushButton *m_btnCopyPath = nullptr;
+  QPushButton *m_btnOpenPhoto = nullptr;
+  QPushButton *m_btnResetExclusions = nullptr;
+  QPushButton *m_btnCloseTile = nullptr;
+  QPushButton *m_btnExportList = nullptr;
   int m_dpi = 300;   // the resolution the output size was last scaled for
 
   const ushort m_variations[6] = {0, 1, 3, 9, 11, 15};

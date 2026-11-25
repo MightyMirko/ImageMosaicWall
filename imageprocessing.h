@@ -4,6 +4,8 @@
 #include <math.h>
 #include <array>
 #include <functional>
+#include <QSet>
+#include <QStringList>
 #include <memory>
 #include <QColor>
 #include <QMap>
@@ -23,6 +25,10 @@ struct ColorLab
 {
     double L, a, b;
 };
+
+// Cells and the visible part of tiles are compared as a grid of this many colors per side.
+const int CellLayoutSize = 4;
+using LabLayout = std::array<ColorLab, CellLayoutSize * CellLayoutSize>;
 
 struct GridPoint : public QPoint
 {
@@ -91,6 +97,31 @@ public:
     void setCacheFile(const QString &fileName);
     // Number of images taken from the cache by the last processMosaicImages().
     int cacheHits() const;
+
+    // One tile of the mosaic: its row and column in the grid, where it is in the output (pixels),
+    // the photo, and how well the photo matches its cell (lower is better).
+    struct TilePlacement
+    {
+        int row;
+        int column;
+        QRect rect;
+        QString path;
+        double distance;
+    };
+
+    // All tiles of the mosaic last generated, in grid order.
+    QList<TilePlacement> placements() const;
+    TilePlacement tilePlacement(int index) const;
+    // The tile at a point of the output, or -1.
+    int tileAt(QPoint outputPoint) const;
+
+    // Puts the best other photo of the tile's group into it. False if there is none.
+    bool swapTile(int index);
+    // Keeps a photo out of the mosaic, now and when it is generated again. Its tiles get the
+    // best other photo of their group. Returns how many tiles still show it, 0 if all were changed.
+    int excludePhoto(const QString &path);
+    QStringList excludedPhotos() const;
+    void clearExcludedPhotos();
 
     // Where the tiles of a mosaic too large to keep in memory are cached, one PNG per photo and
     // size, so each photo is read once for all strips of the output. The tiles are lossless and
@@ -176,7 +207,29 @@ private:
         QSize tileSize;
         QColor color;
         GridPoint slot;
+        double distance;
     };
+
+    // What a cell was matched with: its color and layout, and its group of photos.
+    struct CellFeatures
+    {
+        ColorLab lab;
+        LabLayout layout;
+        int group;
+    };
+
+    std::vector<CellFeatures> m_cellFeatures;   // parallel to m_placedCells
+    std::vector<int> m_imageGroups;             // group of each photo
+    std::vector<LabLayout> m_tileLayouts;       // of each photo, with layout matching only
+    bool m_layoutMatching = false;
+    QSize m_gridSize;
+    QSet<QString> m_excludedPhotos;
+
+    double tileDistance(const CellFeatures &cell, int image) const;
+    bool isExcluded(int image) const;
+    int bestReplacement(int index) const;
+    bool replaceTile(int index);
+    void drawPlacedTile(QImage &target, const PlacedCell &cell) const;
 
     std::vector<PlacedCell> m_placedCells;
     double m_tint = 0.0;
@@ -306,6 +359,11 @@ struct MosaicPart
 // of any size; PNG and JPEG need the part in memory at once. On failure error says why.
 bool saveMosaicPart(ImageProcessing &processing, const QImage *whole, const MosaicPart &part, int dotsPerInch,
                     QString &error);
+
+// Writes which photo is in which tile: CSV, or JSON if the file name ends in .json. On failure
+// error says why.
+bool writeTilePlacements(const QList<ImageProcessing::TilePlacement> &placements, const QString &fileName,
+                         QString &error);
 
 // How camera RAW files in the tile folder are used.
 enum class RawFiles

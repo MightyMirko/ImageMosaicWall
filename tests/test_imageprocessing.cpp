@@ -10,6 +10,9 @@
 #include <QStandardPaths>
 #include <QImage>
 #include <QImageReader>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QThread>
@@ -1089,6 +1092,105 @@ private slots:
         QCOMPARE(QDir(tiles.path()).entryList(QDir::Files, QDir::Name), cached);
         for (const QString &name : cached)
             QCOMPARE(QFileInfo(tiles.filePath(name)).lastModified(), written[name]);
+    }
+
+    // Which photo is in which tile, exported; a tile swapped for the next best photo; a photo
+    // excluded from the mosaic, also when it is created again. The output stays what a fresh
+    // drawing of the same tiles gives.
+    void tileEditing()
+    {
+        QList<QString> files;
+        for (int i = 0; i < 3; ++i)
+            files << saveImage(QString("edit%1.png").arg(i), solidImage(QSize(30, 20), QColor::fromHsv(i * 120, 200, 200)));
+
+        QImage base(120, 80, QImage::Format_RGB32);
+        base.fill(Qt::gray);
+        const QSize output(240, 160);
+        const QRect whole(QPoint(0, 0), output);
+
+        ImageProcessing processing;
+        processing.setCacheFile(m_dir.filePath("edit-cache.sqlite"));
+        processing.processMosaicImages(files);
+        processing.processGrid(base, QSize(6, 4));
+        QVERIFY(processing.generateImage(output, QSize(6, 4), 1));
+
+        // Every tile: its row and column, its place, and the photo; the places cover the output.
+        QList<ImageProcessing::TilePlacement> tiles = processing.placements();
+        QCOMPARE(tiles.size(), 24);
+        long area = 0;
+        for (int i = 0; i < tiles.size(); ++i)
+        {
+            QCOMPARE(tiles[i].row, i / 6);
+            QCOMPARE(tiles[i].column, i % 6);
+            QCOMPARE(tiles[i].rect.size(), QSize(40, 40));
+            QVERIFY(tiles[i].distance >= 0.0);
+            area += tiles[i].rect.width() * tiles[i].rect.height();
+        }
+        QCOMPARE(area, long(output.width()) * output.height());
+        QCOMPARE(processing.tileAt(QPoint(5, 5)), 0);
+        QCOMPARE(processing.tileAt(QPoint(239, 159)), 23);
+        QCOMPARE(processing.tileAt(QPoint(240, 0)), -1);
+
+        // Exported as CSV and as JSON, with a header or as an array.
+        QString error;
+        QString csv = m_dir.filePath("placements.csv");
+        QVERIFY2(writeTilePlacements(tiles, csv, error), qPrintable(error));
+        QFile csvFile(csv);
+        QVERIFY(csvFile.open(QIODevice::ReadOnly));
+        QStringList lines = QString::fromUtf8(csvFile.readAll()).split('\n', Qt::SkipEmptyParts);
+        QCOMPARE(lines.size(), 25);
+        QCOMPARE(lines[0], QString("row,column,x,y,width,height,path,distance"));
+        QVERIFY(lines[1].startsWith("1,1,0,0,40,40,"));
+
+        QString json = m_dir.filePath("placements.json");
+        QVERIFY2(writeTilePlacements(tiles, json, error), qPrintable(error));
+        QFile jsonFile(json);
+        QVERIFY(jsonFile.open(QIODevice::ReadOnly));
+        QJsonArray array = QJsonDocument::fromJson(jsonFile.readAll()).array();
+        QCOMPARE(array.size(), 24);
+        QCOMPARE(array[0].toObject().value("path").toString(), tiles[0].path);
+
+        // Swap: the tile shows another photo, and the output is drawn again to match.
+        QString before = tiles[0].path;
+        QVERIFY(processing.swapTile(0));
+        QVERIFY(processing.tilePlacement(0).path != before);
+        QVERIFY(*processing.getOutputImage() == processing.renderRegion(whole));
+
+        // Exclude a photo: no tile shows it any more, and the mosaic still covers the output.
+        QString excluded = processing.tilePlacement(5).path;
+        QCOMPARE(processing.excludePhoto(excluded), 0);
+        QCOMPARE(processing.excludedPhotos(), QStringList{excluded});
+        for (const ImageProcessing::TilePlacement &tile : processing.placements())
+            QVERIFY(tile.path != excluded);
+        QVERIFY(*processing.getOutputImage() == processing.renderRegion(whole));
+
+        // Created again, it stays out.
+        processing.processGrid(base, QSize(6, 4));
+        QVERIFY(processing.generateImage(output, QSize(6, 4), 1));
+        for (const ImageProcessing::TilePlacement &tile : processing.placements())
+            QVERIFY(tile.path != excluded);
+
+        // Without the mosaic in memory the same edits work on the tiles of the cache.
+        ImageProcessing large;
+        large.setCacheFile(m_dir.filePath("edit-cache-large.sqlite"));
+        large.setTileDirectory(m_dir.filePath("edit-tiles"));
+        large.processMosaicImages(files);
+        large.processGrid(base, QSize(6, 4));
+        large.setMaxImageBytes(1);
+        QVERIFY(large.generateImage(output, QSize(6, 4), 1));
+        QVERIFY(large.getOutputImage() == nullptr);
+        QVERIFY(large.swapTile(0));
+        QCOMPARE(large.excludePhoto(large.tilePlacement(1).path), 0);
+        QVERIFY(large.renderRegion(whole).size() == output);
+
+        // With every photo excluded there is no mosaic.
+        ImageProcessing none;
+        none.setCacheFile(m_dir.filePath("edit-cache-none.sqlite"));
+        none.processMosaicImages(files);
+        none.processGrid(base, QSize(6, 4));
+        for (const QString &file : files)
+            none.excludePhoto(file);
+        QVERIFY(!none.generateImage(output, QSize(6, 4), 1));
     }
 
     // The host's thumbnail is used for the analysis when it has one, so the photo isn't read.

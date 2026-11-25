@@ -12,6 +12,14 @@
 #include <QSettings>
 #include <QString>
 #include <QTimer>
+#include <QBoxLayout>
+#include <QClipboard>
+#include <QDesktopServices>
+#include <QGridLayout>
+#include <QGuiApplication>
+#include <QHBoxLayout>
+#include <QUrl>
+#include <QVBoxLayout>
 #include <iterator>
 #include "asyncdirectoryscanner.h"
 #include "progressbutton.h"
@@ -106,6 +114,10 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(&m_imageProcessing, &ImageProcessing::cellProcessed, this, &MainWindow::onImageCellProgress);
     connect(&m_imageProcessing, &ImageProcessing::stepProgress, this, &MainWindow::onStepProgress);
+    connect(&m_imageView, &ImageViewer::tileClicked, this, &MainWindow::onTileClicked);
+
+    setupTileInfo();
+    setupExport();
 
     connect(&m_imageView, &ImageViewer::folderDropped, this, &MainWindow::onFolderDropped);
     connect(&m_imageView, &ImageViewer::imageDropped, this, &MainWindow::onImageDropped);
@@ -331,6 +343,11 @@ void MainWindow::toggleUI(bool enabled)
 {
     ui->btnGenerate->setEnabled(enabled && m_imageProcessing.isReady());
     ui->btnSave->setEnabled(enabled && m_imageProcessing.hasMosaic());
+    if (m_btnExportList)
+        m_btnExportList->setEnabled(enabled && m_imageProcessing.hasMosaic());
+    if (m_tileInfo)
+        for (QPushButton *button : {m_btnSwapTile, m_btnExcludeTile, m_btnResetExclusions})
+            button->setEnabled(enabled);
 
     ui->btnLoad->setEnabled(enabled);
     ui->btnSetImageFolder->setEnabled(enabled);
@@ -454,6 +471,258 @@ void MainWindow::setTileSource(const QString &text, std::function<QList<QString>
     m_chooseTileFiles = chooseFiles;
     ui->btnTilesFromHost->setText(text);
     ui->btnTilesFromHost->setVisible(bool(chooseFiles));
+}
+
+void MainWindow::setupTileInfo()
+{
+    m_tileInfo = new QFrame(&m_imageView);
+    m_tileInfo->setObjectName("tileInfo");
+    m_tileInfo->setFrameShape(QFrame::StyledPanel);
+    m_tileInfo->setAutoFillBackground(true);
+    m_tileInfo->setMaximumWidth(520);
+    m_tileInfo->hide();
+
+    m_tileInfoText = new QLabel(m_tileInfo);
+    m_tileInfoText->setObjectName("tileInfoText");
+    m_tileInfoText->setWordWrap(true);
+    m_tileInfoText->setTextInteractionFlags(Qt::TextSelectableByMouse);
+
+    m_btnSwapTile = new QPushButton(tr("Swap"), m_tileInfo);
+    m_btnExcludeTile = new QPushButton(tr("Exclude photo"), m_tileInfo);
+    m_btnCopyPath = new QPushButton(tr("Copy path"), m_tileInfo);
+    m_btnOpenPhoto = new QPushButton(tr("Open photo"), m_tileInfo);
+    m_btnResetExclusions = new QPushButton(tr("Reset excluded"), m_tileInfo);
+    m_btnCloseTile = new QPushButton(tr("Close"), m_tileInfo);
+
+    m_btnSwapTile->setObjectName("btnSwapTile");
+    m_btnExcludeTile->setObjectName("btnExcludeTile");
+    m_btnCopyPath->setObjectName("btnCopyPath");
+    m_btnOpenPhoto->setObjectName("btnOpenPhoto");
+    m_btnResetExclusions->setObjectName("btnResetExclusions");
+    m_btnCloseTile->setObjectName("btnCloseTile");
+
+    // Two rows of three, so every label fits.
+    auto *buttons = new QGridLayout;
+    buttons->addWidget(m_btnSwapTile, 0, 0);
+    buttons->addWidget(m_btnExcludeTile, 0, 1);
+    buttons->addWidget(m_btnResetExclusions, 0, 2);
+    buttons->addWidget(m_btnCopyPath, 1, 0);
+    buttons->addWidget(m_btnOpenPhoto, 1, 1);
+    buttons->addWidget(m_btnCloseTile, 1, 2);
+
+    auto *layout = new QVBoxLayout(m_tileInfo);
+    layout->addWidget(m_tileInfoText);
+    layout->addLayout(buttons);
+
+    connect(m_btnSwapTile, &QPushButton::clicked, this, &MainWindow::swapSelectedTile);
+    connect(m_btnExcludeTile, &QPushButton::clicked, this, &MainWindow::excludeSelectedTile);
+    connect(m_btnResetExclusions, &QPushButton::clicked, this, &MainWindow::resetExclusions);
+    connect(m_btnCopyPath, &QPushButton::clicked, this, [this]() {
+        if (m_selectedTile >= 0)
+            QGuiApplication::clipboard()->setText(m_imageProcessing.tilePlacement(m_selectedTile).path);
+    });
+    connect(m_btnOpenPhoto, &QPushButton::clicked, this, [this]() {
+        if (m_selectedTile >= 0)
+            QDesktopServices::openUrl(QUrl::fromLocalFile(m_imageProcessing.tilePlacement(m_selectedTile).path));
+    });
+    connect(m_btnCloseTile, &QPushButton::clicked, this, &MainWindow::hideTileInfo);
+}
+
+namespace
+{
+
+// The layout that holds the widget somewhere in its items, or null.
+QLayout *layoutHolding(QLayout *layout, QWidget *widget)
+{
+    for (int i = 0; i < layout->count(); ++i)
+    {
+        QLayoutItem *item = layout->itemAt(i);
+
+        if (item->widget() == widget)
+            return layout;
+
+        if (item->layout())
+            if (QLayout *found = layoutHolding(item->layout(), widget))
+                return found;
+    }
+
+    return nullptr;
+}
+
+} // namespace
+
+void MainWindow::setupExport()
+{
+    QWidget *save = ui->btnSave;
+    m_btnExportList = new QPushButton(tr("Export list ..."), save->parentWidget());
+    m_btnExportList->setObjectName("btnExportList");
+    m_btnExportList->setEnabled(false);
+    m_btnExportList->setToolTip(tr("Which photo is in which tile, as CSV or JSON"));
+    connect(m_btnExportList, &QPushButton::clicked, this, &MainWindow::exportTileList);
+
+    // Below the Save button, in its column, in the layout that holds the Save button.
+    for (QWidget *ancestor = save->parentWidget(); ancestor; ancestor = ancestor->parentWidget())
+    {
+        if (!ancestor->layout())
+            continue;
+
+        QLayout *holder = layoutHolding(ancestor->layout(), save);
+        if (!holder)
+            continue;
+
+        if (auto *grid = qobject_cast<QGridLayout *>(holder))
+        {
+            for (int i = 0; i < grid->count(); ++i)
+            {
+                if (grid->itemAt(i)->widget() != save)
+                    continue;
+
+                int row, column, rowSpan, columnSpan;
+                grid->getItemPosition(i, &row, &column, &rowSpan, &columnSpan);
+                grid->addWidget(m_btnExportList, row + rowSpan, column, 1, columnSpan);
+                return;
+            }
+        }
+        else if (auto *box = qobject_cast<QBoxLayout *>(holder))
+        {
+            box->addWidget(m_btnExportList);
+            return;
+        }
+
+        break;
+    }
+}
+
+void MainWindow::onTileClicked(QPointF scenePos)
+{
+    // The view shows the base image; the mosaic is larger by the output scale.
+    if (!m_imageProcessing.hasMosaic() || m_baseImage.isNull())
+    {
+        hideTileInfo();
+        return;
+    }
+
+    QSize output = m_imageProcessing.mosaicSize();
+    QPoint point(qFloor(scenePos.x() * output.width() / m_baseImage.width()),
+                 qFloor(scenePos.y() * output.height() / m_baseImage.height()));
+
+    m_selectedTile = m_imageProcessing.tileAt(point);
+
+    if (m_selectedTile < 0)
+        hideTileInfo();
+    else
+        showTileInfo();
+}
+
+void MainWindow::showTileInfo()
+{
+    if (m_selectedTile < 0 || !m_tileInfo)
+        return;
+
+    ImageProcessing::TilePlacement tile = m_imageProcessing.tilePlacement(m_selectedTile);
+    m_tileInfoText->setText(tr("Row %1, column %2: %3\nmatch distance %4, %5 excluded photo(s)")
+                                .arg(tile.row + 1)
+                                .arg(tile.column + 1)
+                                .arg(QFileInfo(tile.path).fileName())
+                                .arg(QString::number(tile.distance, 'f', 3))
+                                .arg(m_imageProcessing.excludedPhotos().size()));
+    m_tileInfoText->setToolTip(QDir::toNativeSeparators(tile.path));
+
+    m_tileInfo->adjustSize();
+    m_tileInfo->move(10, 10);
+    m_tileInfo->show();
+    m_tileInfo->raise();
+}
+
+void MainWindow::hideTileInfo()
+{
+    m_selectedTile = -1;
+
+    if (m_tileInfo)
+        m_tileInfo->hide();
+}
+
+void MainWindow::refreshMosaic()
+{
+    const QImage *out = m_imageProcessing.getOutputImage();
+
+    if (out)
+        m_imageView.setPreview(*out);
+    else if (!m_largePreview.isNull() || m_imageProcessing.hasMosaic())
+    {
+        m_largePreview = m_imageProcessing.renderPreview(QSize(8192, 8192));
+        if (!m_largePreview.isNull())
+            m_imageView.setPreview(m_largePreview);
+    }
+}
+
+void MainWindow::swapSelectedTile()
+{
+    if (m_selectedTile < 0)
+        return;
+
+    if (!m_imageProcessing.swapTile(m_selectedTile))
+    {
+        ui->lblStatus->setText(tr("No other photo of the same kind fits this tile."));
+        return;
+    }
+
+    refreshMosaic();
+    showTileInfo();
+}
+
+void MainWindow::excludeSelectedTile()
+{
+    if (m_selectedTile < 0)
+        return;
+
+    QString path = m_imageProcessing.tilePlacement(m_selectedTile).path;
+    int unchanged = m_imageProcessing.excludePhoto(path);
+    QString name = QFileInfo(path).fileName();
+
+    refreshMosaic();
+    showTileInfo();
+
+    ui->lblStatus->setText(unchanged == 0
+                               ? tr("%1 is left out of the mosaic, also when it is created again.").arg(name)
+                               : tr("%1 is left out, but %2 tiles could not get another photo.").arg(name).arg(unchanged));
+}
+
+void MainWindow::resetExclusions()
+{
+    m_imageProcessing.clearExcludedPhotos();
+    showTileInfo();
+    ui->lblStatus->setText(tr("The excluded photos are used again when the mosaic is created next."));
+}
+
+void MainWindow::exportTileList()
+{
+    if (!m_imageProcessing.hasMosaic())
+        return;
+
+    QFileInfo base(m_baseImagePath);
+    QString suggestion = m_baseImagePath.isEmpty() ? QStringLiteral("placement.csv")
+                                                   : base.dir().filePath(base.completeBaseName() + "_placement.csv");
+
+    QString filename = QFileDialog::getSaveFileName(this, tr("Export Tile List"), suggestion,
+                                                    tr("CSV (*.csv);;JSON (*.json)"));
+
+    if (filename.isEmpty())
+        return;
+
+    if (QFileInfo(filename).suffix().isEmpty())
+        filename += ".csv";
+
+    QList<ImageProcessing::TilePlacement> tiles = m_imageProcessing.placements();
+    QString error;
+
+    if (!writeTilePlacements(tiles, filename, error))
+    {
+        QMessageBox::warning(this, tr("Export Tile List"), tr("The list could not be written. %1").arg(error));
+        return;
+    }
+
+    ui->lblStatus->setText(tr("Exported %1 tiles to %2").arg(tiles.size()).arg(QDir::toNativeSeparators(filename)));
 }
 
 void MainWindow::setPhotoThumbnails(ImageProcessing::ThumbnailProvider provider)
@@ -723,6 +992,7 @@ void MainWindow::on_btnGenerate_clicked()
     toggleUI(false);
     m_imageProcessing.processCanceled(false);
     m_imageView.clearPreview();
+    hideTileInfo();
     ui->btnCancel->show();
     ui->barStep->setRange(0, 1);
     ui->barStep->setValue(0);

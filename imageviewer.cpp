@@ -210,6 +210,16 @@ void ImageViewer::resizeEvent(QResizeEvent *)
 void ImageViewer::mousePressEvent(QMouseEvent *event)
 {
     m_moveOffset = event->pos();
+    m_pressPos = event->pos();
+}
+
+void ImageViewer::mouseReleaseEvent(QMouseEvent *event)
+{
+    // Barely moved between press and release: a click, not the end of a pan.
+    if (event->button() == Qt::LeftButton && (event->pos() - m_pressPos).manhattanLength() < 4)
+        emit tileClicked(mapToScene(event->pos()));
+
+    QGraphicsView::mouseReleaseEvent(event);
 }
 
 void ImageViewer::mouseMoveEvent(QMouseEvent *event)

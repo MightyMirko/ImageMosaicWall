@@ -337,6 +337,61 @@ private slots:
         }
     }
 
+    // A click on a tile of the mosaic names its photo; excluding the photo keeps it out.
+    void tilePanelShowsAndExcludes()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QString base = dir.filePath("base.png");
+        QImage image(120, 80, QImage::Format_RGB32);
+        image.fill(Qt::gray);
+        QVERIFY(image.save(base));
+
+        QList<QString> photos;
+        for (int i = 0; i < 3; ++i)
+        {
+            QImage photo(30, 20, QImage::Format_RGB32);
+            photo.fill(QColor::fromHsv(i * 120, 200, 200));
+            QString path = dir.filePath(QString("pick%1.png").arg(i));
+            QVERIFY(photo.save(path));
+            photos << path;
+        }
+
+        MainWindow window;
+        window.setRememberedTileSource("Tiles from last selection", [photos]() { return photos; });
+        window.onImageDropped(base);
+        QThreadPool::globalInstance()->waitForDone();
+        QCoreApplication::processEvents();
+
+        child<QComboBox>(window, "cbTileShape")->setCurrentIndex(0);   // free rows and columns
+        child<QSpinBox>(window, "sbCols")->setValue(6);
+        child<QSpinBox>(window, "sbRows")->setValue(4);
+        child<QPushButton>(window, "btnTilesLast")->click();
+        QThreadPool::globalInstance()->waitForDone();
+        QCoreApplication::processEvents();
+
+        child<QPushButton>(window, "btnGenerate")->click();
+        QVERIFY(QTest::qWaitFor([&] { return child<QPushButton>(window, "btnSave")->isEnabled(); }, 20000));
+        QThreadPool::globalInstance()->waitForDone();
+        QVERIFY(child<QPushButton>(window, "btnExportList")->isEnabled());
+
+        // The mosaic is 120 x 80 here, the view shows it at the same size.
+        window.onTileClicked(QPointF(5, 5));
+        QVERIFY(!child<QFrame>(window, "tileInfo")->isHidden());
+        QVERIFY(child<QLabel>(window, "tileInfoText")->text().contains("Row 1, column 1"));
+        QString before = child<QLabel>(window, "tileInfoText")->toolTip();
+
+        // Excluded: the tile shows another photo now, and the status says so.
+        child<QPushButton>(window, "btnExcludeTile")->click();
+        QVERIFY(child<QLabel>(window, "lblStatus")->text().contains("left out"));
+        QVERIFY(!child<QFrame>(window, "tileInfo")->isHidden());
+        QVERIFY(child<QLabel>(window, "tileInfoText")->toolTip() != before);
+
+        // A point outside the mosaic hides the panel.
+        window.onTileClicked(QPointF(-50, -50));
+        QVERIFY(child<QFrame>(window, "tileInfo")->isHidden());
+    }
+
     // The step bar shows the step in progress and how far it has got.
     void stepProgressShowsTheBar()
     {

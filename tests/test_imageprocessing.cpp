@@ -1148,6 +1148,8 @@ private slots:
         QVERIFY(jsonFile.open(QIODevice::ReadOnly));
         QJsonArray array = QJsonDocument::fromJson(jsonFile.readAll()).array();
         QCOMPARE(array.size(), 24);
+        QCOMPARE(array[0].toObject().value("row").toInt(), 1);
+        QCOMPARE(array[0].toObject().value("column").toInt(), 1);
         QCOMPARE(array[0].toObject().value("path").toString(), tiles[0].path);
 
         // Swap: the tile shows another photo, and the output is drawn again to match.

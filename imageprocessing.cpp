@@ -1859,8 +1859,8 @@ bool writeTilePlacements(const QList<ImageProcessing::TilePlacement> &placements
         for (const ImageProcessing::TilePlacement &tile : placements)
         {
             QJsonObject object;
-            object["row"] = tile.row;
-            object["column"] = tile.column;
+            object["row"] = tile.row + 1;
+            object["column"] = tile.column + 1;
             object["x"] = tile.rect.x();
             object["y"] = tile.rect.y();
             object["width"] = tile.rect.width();

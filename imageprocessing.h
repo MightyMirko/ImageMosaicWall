@@ -3,6 +3,7 @@
 
 #include <math.h>
 #include <array>
+#include <functional>
 #include <memory>
 #include <QColor>
 #include <QMap>
@@ -97,6 +98,17 @@ public:
     // runs and reused while the photo is unchanged.
     void setTileDirectory(const QString &directory);
 
+    // A source of photo thumbnails, e.g. from the host application's thumbnail database. Used
+    // for the analysis of the photos when it has one; a null image means "none, read the photo".
+    // Called from several threads at once.
+    using ThumbnailProvider = std::function<QImage(const QString &, QSize)>;
+    void setThumbnailProvider(ThumbnailProvider provider);
+
+    // Threads that read photos from disk. A disk serves its reads one after another, so more
+    // threads don't read faster; they only compete for the disk.
+    void setReadThreads(int threads);
+    int readThreads() const;
+
     // Reports the progress of the current step, from any thread: done of total items.
     void reportStep(const QString &step, int done, int total);
 
@@ -152,6 +164,8 @@ private:
     QSize m_outputSize;
     std::shared_ptr<QImage> m_outputImage;
     qint64 m_maxImageBytes = qint64(1) << 30;
+    ThumbnailProvider m_thumbnailProvider;
+    int m_readThreads = 4;
 
     // A cell of the last generated mosaic with its image: where it is drawn, the size its
     // tile is loaded at, the target color for tint, and its slot of the grid.

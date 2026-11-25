@@ -1091,6 +1091,39 @@ private slots:
             QCOMPARE(QFileInfo(tiles.filePath(name)).lastModified(), written[name]);
     }
 
+    // The host's thumbnail is used for the analysis when it has one, so the photo isn't read.
+    void thumbnailProviderIsUsed()
+    {
+        // The file doesn't exist: its color can only come from the provider.
+        const QString missing = m_dir.filePath("only-in-the-host.jpg");
+        QList<QString> files{missing};
+
+        std::atomic<int> asked{0};
+        // Own cache files, so an analysis from one run isn't taken from the cache by the next.
+        ImageProcessing processing;
+        processing.setCacheFile(m_dir.filePath("provider-cache.sqlite"));
+        processing.setThumbnailProvider([&](const QString &path, QSize size) {
+            ++asked;
+            return path == missing ? solidImage(QSize(size), Qt::red) : QImage();
+        });
+        processing.processMosaicImages(files);
+
+        QCOMPARE(asked.load(), 1);
+        QCOMPARE(processing.getImageMeanMap().value(missing), QColor(Qt::red));
+
+        // A null thumbnail falls back to reading the photo; here that fails, so nothing is added.
+        ImageProcessing fallback;
+        fallback.setCacheFile(m_dir.filePath("fallback-cache.sqlite"));
+        fallback.setThumbnailProvider([](const QString &, QSize) { return QImage(); });
+        fallback.processMosaicImages(files);
+        QVERIFY(!fallback.getImageMeanMap().contains(missing));
+
+        // Few threads for the disk, at least one.
+        QCOMPARE(processing.readThreads(), 4);
+        processing.setReadThreads(0);
+        QCOMPARE(processing.readThreads(), 1);
+    }
+
     // Every step reports its progress up to its total, from the photos to the drawing.
     void stepProgress()
     {

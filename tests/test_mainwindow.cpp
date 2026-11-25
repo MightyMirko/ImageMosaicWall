@@ -244,6 +244,8 @@ private slots:
             QThreadPool::globalInstance()->waitForDone();
             QVERIFY(QTest::qWaitFor([&] { return child<ProgressButton>(window, "btnSetImageFolder")->maxValue() == 3; },
                                     10000));
+            // The analysis runs in the background; the window must not go before it.
+            QThreadPool::globalInstance()->waitForDone();
             QCOMPARE(child<QSpinBox>(window, "sbWidth")->value(), 1500);
             QCOMPARE(child<QSpinBox>(window, "sbHeight")->value(), 1000);
             QVERIFY(child<QLabel>(window, "lblOutputInfo")->text().contains("1500 x 1000 px"));
@@ -305,6 +307,8 @@ private slots:
             last->click();
             QVERIFY(QTest::qWaitFor([&] { return child<ProgressButton>(window, "btnSetImageFolder")->maxValue() == 3; },
                                     10000));
+            // The analysis runs in the background; the window must not go before it.
+            QThreadPool::globalInstance()->waitForDone();
         }
 
         // Debug mode, the host hands over the same image: the tiles and the output size come back.
@@ -316,6 +320,8 @@ private slots:
             QThreadPool::globalInstance()->waitForDone();
             QVERIFY(QTest::qWaitFor([&] { return child<ProgressButton>(window, "btnSetImageFolder")->maxValue() == 3; },
                                     10000));
+            // The analysis runs in the background; the window must not go before it.
+            QThreadPool::globalInstance()->waitForDone();
             QCOMPARE(child<QSpinBox>(window, "sbWidth")->value(), 1500);
             QCOMPARE(child<QSpinBox>(window, "sbHeight")->value(), 1000);
         }

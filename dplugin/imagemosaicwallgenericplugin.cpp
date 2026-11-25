@@ -38,6 +38,8 @@
 // digiKam includes
 
 #include <dinfointerface.h>
+#include <thumbnailinfo.h>
+#include <thumbnailloadthread.h>
 #include <dmessagebox.h>
 
 // Local includes
@@ -94,6 +96,29 @@ QList<int> rememberedAlbums()
     }
 
     return albums;
+}
+
+// digiKam's thumbnail of a photo, from its thumbnail database; digiKam makes it when there is none,
+// as it does when browsing. Called from the analysis threads, like digiKam's own face pipeline
+// does: a catcher per call, which gets the result directly from the loading thread.
+QImage digiKamThumbnail(const QString& path, QSize size)
+{
+    ThumbnailLoadThread* const thread = ThumbnailLoadThread::defaultThread();
+
+    if (!thread)
+    {
+        return QImage();
+    }
+
+    ThumbnailImageCatcher catcher(thread);
+    catcher.setActive(true);
+
+    thread->find(ThumbnailIdentifier(path), qMax(size.width(), size.height()));
+    catcher.enqueue();
+
+    const QList<QImage> images = catcher.waitForThumbnails();
+
+    return images.isEmpty() ? QImage() : images.first();
 }
 
 // The local files of the given tags and albums, each photo once.
@@ -246,6 +271,12 @@ void ImageMosaicWallPlugin::slotImageMosaicWall()
                     return albumFiles(iface, rememberedAlbums());
                 }
             );
+        }
+
+        // Opt-in while it is tested: digiKam's thumbnails for the analysis of the photos.
+        if (qEnvironmentVariableIntValue("IMAGEMOSAICWALL_DIGIKAM_THUMBNAILS") != 0)
+        {
+            dlg->setPhotoThumbnails(digiKamThumbnail);
         }
 
         dlg->show();

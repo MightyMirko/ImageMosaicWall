@@ -28,6 +28,8 @@ public:
   // Adds a button that loads tile images from the host application, e.g. digiKam's
   // albums and tags. chooseFiles returns the chosen files, or nothing if cancelled.
   void setTileSource(const QString &text, std::function<QList<QString>()> chooseFiles);
+  // Thumbnails of the photos from the host, used for the analysis instead of reading the photos.
+  void setPhotoThumbnails(ImageProcessing::ThumbnailProvider provider);
   // A button that uses the tiles chosen last time, without asking again; the function returns them.
   void setRememberedTileSource(const QString &text, std::function<QList<QString>()> rememberedFiles);
 

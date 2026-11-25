@@ -944,7 +944,10 @@ void ImageProcessing::calculateImageMeanMap(const QList<QString> imageList,
             return;
         }
 
-        QImage image = extractThumbnail(imageFileName, QSize(128, 128));
+        // The host's thumbnail first: then the photo itself isn't read at all.
+        QImage image = m_thumbnailProvider ? m_thumbnailProvider(imageFileName, QSize(128, 128)) : QImage();
+        if (image.isNull())
+            image = extractThumbnail(imageFileName, QSize(128, 128));
         bool fromPreview = !image.isNull();
 
         if (!fromPreview)
@@ -1008,7 +1011,9 @@ void ImageProcessing::calculateImageMeanMap(const QList<QString> imageList,
         reportStep(tr("Analysing photos"), ++analysed, total);
     };
 
-    QtConcurrent::map(imageList, scale).waitForFinished();
+    QThreadPool pool;
+    pool.setMaxThreadCount(m_readThreads);
+    QtConcurrent::map(&pool, imageList, scale).waitForFinished();
 }
 
 namespace
@@ -1054,6 +1059,21 @@ QString ImageProcessing::tileDirectory() const
     return QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/imagemosaicwall/tiles";
 }
 
+void ImageProcessing::setThumbnailProvider(ThumbnailProvider provider)
+{
+    m_thumbnailProvider = std::move(provider);
+}
+
+void ImageProcessing::setReadThreads(int threads)
+{
+    m_readThreads = qMax(1, threads);
+}
+
+int ImageProcessing::readThreads() const
+{
+    return m_readThreads;
+}
+
 void ImageProcessing::reportStep(const QString &step, int done, int total)
 {
     emit stepProgress(step, done, total);
@@ -1083,7 +1103,10 @@ bool ImageProcessing::prepareTiles()
     std::atomic<int> prepared{0};
     int total = int(images.size());
 
-    QtConcurrent::blockingMap(positions, [&](int position) {
+    QThreadPool pool;
+    pool.setMaxThreadCount(m_readThreads);
+
+    QtConcurrent::blockingMap(&pool, positions, [&](int position) {
         if (!m_skipBackgroundProcess)
         {
             int image = images[position];

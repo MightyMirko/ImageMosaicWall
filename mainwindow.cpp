@@ -456,6 +456,11 @@ void MainWindow::setTileSource(const QString &text, std::function<QList<QString>
     ui->btnTilesFromHost->setVisible(bool(chooseFiles));
 }
 
+void MainWindow::setPhotoThumbnails(ImageProcessing::ThumbnailProvider provider)
+{
+    m_imageProcessing.setThumbnailProvider(std::move(provider));
+}
+
 void MainWindow::setRememberedTileSource(const QString &text, std::function<QList<QString>()> rememberedFiles)
 {
     m_rememberedTileFiles = rememberedFiles;

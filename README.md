@@ -8,7 +8,7 @@
 
 This application allows you to create an image based on a bunch of other images. It looks like a mosaic effect. But on detail you can check the following video.
 
-[![](http://i3.ytimg.com/vi/FyXyUtVnVyQ/maxresdefault.jpg)](https://www.youtube.com/watch?v=FyXyUtVnVyQ "")
+[![](example_lotus.png)](https://www.youtube.com/watch?v=FyXyUtVnVyQ "")
 
 # Dependencies
 

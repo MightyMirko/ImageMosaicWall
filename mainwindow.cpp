@@ -243,38 +243,52 @@ void MainWindow::saveSettings() const
     settings.setValue("LastImageFolder", m_lastImageFolder);
     settings.setValue("LastTileFolder", m_lastTileFolder);
     settings.setValue("LastSaveFolder", m_lastSaveFolder);
-    settings.setValue("LastBaseImage", m_baseImagePath);
-    settings.setValue("OutputWidth", ui->sbWidth->value());
-    settings.setValue("OutputHeight", ui->sbHeight->value());
+    // A window opened without an image must not overwrite the image and size of the last one.
+    if (!m_baseImagePath.isEmpty())
+    {
+        settings.setValue("LastBaseImage", m_baseImagePath);
+        settings.setValue("OutputWidth", ui->sbWidth->value());
+        settings.setValue("OutputHeight", ui->sbHeight->value());
+    }
 }
 
 void MainWindow::restoreDebugSession()
 {
-    // An image the host or the user already chose is kept.
-    if (!m_baseImage.isNull())
-        return;
-
     QSettings settings(SettingsFormat, QSettings::UserScope, SettingsOrganization, SettingsApplication);
     QString image = settings.value("LastBaseImage").toString();
     int width = settings.value("OutputWidth").toInt();
     int height = settings.value("OutputHeight").toInt();
 
-    if (QFileInfo::exists(image))
-    {
+    // The host (digiKam) may have handed over its image already; then that one is kept.
+    if (m_baseImage.isNull() && QFileInfo::exists(image))
         loadImage(image);
 
-        // loadImage() sets the output to the image's size; put back the one used last time.
-        if (!m_baseImage.isNull() && width > 0 && height > 0)
+    // The tags or albums chosen last time, else the tile folder used last time.
+    QList<QString> tiles = m_rememberedTileFiles ? m_rememberedTileFiles() : QList<QString>();
+    if (!tiles.isEmpty())
+    {
+        loadTileImages(tiles);
+    }
+    else
+    {
+        QString folder = m_lastTileFolder;
+        if (QDir(folder).exists())
+            loadImageFolder(folder);
+    }
+
+    // The output size as last time, when the image has the same proportions. loadImage() sets
+    // the output to the image's size, so this comes after it.
+    if (!m_baseImage.isNull() && width > 0 && height > 0)
+    {
+        double ratio = double(width) / height;
+        double imageRatio = double(m_baseImage.width()) / m_baseImage.height();
+
+        if (qAbs(ratio - imageRatio) < 0.01)
         {
             ui->sbWidth->setValue(width);
             ui->sbHeight->setValue(height);
         }
     }
-
-    // The tile folder is scanned again; its photos are analysed from the tile cache.
-    QString folder = m_lastTileFolder;
-    if (QDir(folder).exists())
-        loadImageFolder(folder);
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
@@ -440,6 +454,26 @@ void MainWindow::setTileSource(const QString &text, std::function<QList<QString>
     m_chooseTileFiles = chooseFiles;
     ui->btnTilesFromHost->setText(text);
     ui->btnTilesFromHost->setVisible(bool(chooseFiles));
+}
+
+void MainWindow::setRememberedTileSource(const QString &text, std::function<QList<QString>()> rememberedFiles)
+{
+    m_rememberedTileFiles = rememberedFiles;
+    ui->btnTilesLast->setText(text);
+    ui->btnTilesLast->setVisible(bool(rememberedFiles) && !text.isEmpty());
+}
+
+void MainWindow::on_btnTilesLast_clicked()
+{
+    QList<QString> files = m_rememberedTileFiles ? m_rememberedTileFiles() : QList<QString>();
+
+    if (files.isEmpty())
+    {
+        ui->lblStatus->setText(tr("No tags or albums are remembered yet. Choose them with Tiles from digiKam first."));
+        return;
+    }
+
+    loadTileImages(files);
 }
 
 void MainWindow::on_btnTilesFromHost_clicked()

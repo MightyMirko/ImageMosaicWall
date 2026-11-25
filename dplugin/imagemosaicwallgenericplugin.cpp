@@ -32,6 +32,8 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QVBoxLayout>
+#include <QSettings>
+#include <QStringList>
 
 // digiKam includes
 
@@ -50,6 +52,76 @@ void initImageMosaicWallResource()
 
 namespace DigikamGenericImageMosaicWallPlugin
 {
+
+namespace
+{
+
+// digiKam keeps the checked tags and albums of the chooser only when the chooser is destroyed,
+// and the plugin keeps it alive. So the selection is kept here instead, in the window's own
+// settings file, and can be used again without choosing it again.
+const char RememberedAlbumsKey[] = "RememberedAlbumIds";
+
+QSettings rememberedSettings()
+{
+    return QSettings(QSettings::IniFormat, QSettings::UserScope, "ImageMosaicWall", "ImageMosaicWall");
+}
+
+void rememberAlbums(const QList<int>& albums)
+{
+    QStringList ids;
+
+    for (int id : albums)
+    {
+        ids << QString::number(id);
+    }
+
+    rememberedSettings().setValue(QLatin1String(RememberedAlbumsKey), ids);
+}
+
+QList<int> rememberedAlbums()
+{
+    QList<int> albums;
+
+    for (const QString& id : rememberedSettings().value(QLatin1String(RememberedAlbumsKey)).toStringList())
+    {
+        bool ok = false;
+        int value = id.toInt(&ok);
+
+        if (ok)
+        {
+            albums << value;
+        }
+    }
+
+    return albums;
+}
+
+// The local files of the given tags and albums, each photo once.
+QList<QString> albumFiles(const DInfoInterface* iface, const QList<int>& albums)
+{
+    QList<QString> files;
+
+    if (albums.isEmpty())
+    {
+        return files;
+    }
+
+    const QList<QUrl> urls = iface->albumsItems(albums);
+
+    for (const QUrl& url : urls)
+    {
+        if (url.isLocalFile())
+        {
+            files << url.toLocalFile();
+        }
+    }
+
+    files.removeDuplicates();
+
+    return files;
+}
+
+} // namespace
 
 ImageMosaicWallPlugin::ImageMosaicWallPlugin(QObject* const parent)
     : DPluginGeneric(parent)
@@ -161,21 +233,17 @@ void ImageMosaicWallPlugin::slotImageMosaicWall()
                     }
 
                     // Albums, tags (including people), searches and labels; a photo can be
-                    // in several of the selected ones.
+                    // in several of the selected ones. The choice is remembered for next time.
+                    const QList<int> albums = iface->albumChooserItems();
+                    rememberAlbums(albums);
 
-                    const QList<QUrl> urls = iface->albumsItems(iface->albumChooserItems());
+                    return albumFiles(iface, albums);
+                }
+            );
 
-                    for (const QUrl& url : urls)
-                    {
-                        if (url.isLocalFile())
-                        {
-                            files << url.toLocalFile();
-                        }
-                    }
-
-                    files.removeDuplicates();
-
-                    return files;
+            dlg->setRememberedTileSource(tr("Tiles from last selection"), [iface]()
+                {
+                    return albumFiles(iface, rememberedAlbums());
                 }
             );
         }

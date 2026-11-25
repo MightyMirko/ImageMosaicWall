@@ -4,6 +4,7 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QLabel>
+#include <QPushButton>
 #include <QProgressBar>
 #include <QSettings>
 #include "progressbutton.h"
@@ -256,6 +257,76 @@ private slots:
             QCoreApplication::processEvents();
             QVERIFY(child<QSpinBox>(window, "sbWidth")->value() != 1500);
             // The folder is not scanned: its 3 photos never become the count.
+            QVERIFY(child<ProgressButton>(window, "btnSetImageFolder")->maxValue() != 3);
+        }
+    }
+
+    // The tiles chosen last time can be used again with one button, and debug mode uses them
+    // on start, also when the host (digiKam) has already handed over its image.
+    void rememberedTilesAreUsedAgain()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QString base = dir.filePath("base.png");
+        QImage image(300, 200, QImage::Format_RGB32);
+        image.fill(Qt::gray);
+        QVERIFY(image.save(base));
+
+        QList<QString> photos;
+        for (int i = 0; i < 3; ++i)
+        {
+            QImage photo(40, 30, QImage::Format_RGB32);
+            photo.fill(QColor::fromHsv(i * 100, 200, 200));
+            QString path = dir.filePath(QString("tag%1.png").arg(i));
+            QVERIFY(photo.save(path));
+            photos << path;
+        }
+
+        auto remembered = [&]() { return photos; };
+
+        // The window before: the host hands over an image, the output is set, and the
+        // window is closed; the settings keep the image and the output size.
+        {
+            MainWindow window;
+            window.setRememberedTileSource("Tiles from last selection", remembered);
+            window.onImageDropped(base);
+            QThreadPool::globalInstance()->waitForDone();
+            QCoreApplication::processEvents();
+            child<QSpinBox>(window, "sbWidth")->setValue(1500);
+            child<QSpinBox>(window, "sbHeight")->setValue(1000);
+        }
+
+        // The button uses the remembered files.
+        {
+            MainWindow window;
+            window.setRememberedTileSource("Tiles from last selection", remembered);
+            QPushButton *last = child<QPushButton>(window, "btnTilesLast");
+            QVERIFY(!last->isHidden());
+            last->click();
+            QVERIFY(QTest::qWaitFor([&] { return child<ProgressButton>(window, "btnSetImageFolder")->maxValue() == 3; },
+                                    10000));
+        }
+
+        // Debug mode, the host hands over the same image: the tiles and the output size come back.
+        qputenv("IMAGEMOSAICWALL_DEBUG_SESSION", "1");
+        {
+            MainWindow window;
+            window.setRememberedTileSource("Tiles from last selection", remembered);
+            window.onImageDropped(base);
+            QThreadPool::globalInstance()->waitForDone();
+            QVERIFY(QTest::qWaitFor([&] { return child<ProgressButton>(window, "btnSetImageFolder")->maxValue() == 3; },
+                                    10000));
+            QCOMPARE(child<QSpinBox>(window, "sbWidth")->value(), 1500);
+            QCOMPARE(child<QSpinBox>(window, "sbHeight")->value(), 1000);
+        }
+        qunsetenv("IMAGEMOSAICWALL_DEBUG_SESSION");
+
+        // Nothing remembered: the button says so and loads nothing.
+        {
+            MainWindow window;
+            window.setRememberedTileSource("Tiles from last selection", [] { return QList<QString>(); });
+            child<QPushButton>(window, "btnTilesLast")->click();
+            QVERIFY(child<QLabel>(window, "lblStatus")->text().contains("remembered"));
             QVERIFY(child<ProgressButton>(window, "btnSetImageFolder")->maxValue() != 3);
         }
     }

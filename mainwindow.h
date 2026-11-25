@@ -28,6 +28,8 @@ public:
   // Adds a button that loads tile images from the host application, e.g. digiKam's
   // albums and tags. chooseFiles returns the chosen files, or nothing if cancelled.
   void setTileSource(const QString &text, std::function<QList<QString>()> chooseFiles);
+  // A button that uses the tiles chosen last time, without asking again; the function returns them.
+  void setRememberedTileSource(const QString &text, std::function<QList<QString>()> rememberedFiles);
 
 protected:
   void closeEvent(QCloseEvent *event) override;
@@ -74,6 +76,7 @@ private slots:
   void on_btnSave_clicked();
   void on_btnSetImageFolder_clicked();
   void on_btnTilesFromHost_clicked();
+  void on_btnTilesLast_clicked();
 
 private:
   Ui::MainWindow *ui;
@@ -101,6 +104,7 @@ private:
   QString m_baseImagePath;
   QList<QString> m_tileFiles;
   std::function<QList<QString>()> m_chooseTileFiles;
+  std::function<QList<QString>()> m_rememberedTileFiles;
 };
 
 #endif // MAINWINDOW_H
